@@ -17,7 +17,7 @@ int NUM_ACCS = 0;
 account *account_arr;
 command_line *cmd_arr;
 pthread_mutex_t account_mutex;
-int resources_freed = 0;  // Track if resources have been freed
+int resources_freed = 0;  // binary to track if resources have been freed
 
 typedef struct {
     command_line *transactions;
@@ -25,10 +25,10 @@ typedef struct {
     int end_index;
 } thread_data;
 
-// pipe time
+// pipe for auditor
 int pipe_fd[2];
 
-stats_t stats = {0}; // Initialize all stats to 0
+stats_t stats = {0}; // init stats
 
 struct timeval start_time;
 
@@ -38,34 +38,30 @@ pthread_mutex_t update_mutex;
 int transactions_processed = 0;
 int update_ready = 0;
 
-// Add these debug counters as global variables
+//debug counters
 atomic_int total_processed = 0;
 atomic_int barrier_wait_count = 0;
 atomic_int update_cycles = 0;
 
 volatile int should_exit = 0;
 
-// Add this global variable at the top
 atomic_int total_updates = 0;
 
-// Add to global variables
 atomic_int valid_transaction_count = 0;  // Only counts valid non-check transactions
 pthread_mutex_t bank_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t bank_cond = PTHREAD_COND_INITIALIZER;
 int bank_ready = 0;
 atomic_int active_threads = NUM_WORKERS;  // Track active threads
 
-// Add to global variables at the top
 atomic_int ledger_line_count = 0;
 
-// Add global counter for balance checks
 atomic_int check_counter = 0;
 
 void* process_transaction(void* arg);
 void* update_balance(void* arg);
 void auditor_process(int read_fd);
 
-// Add cleanup function
+// cleanup function
 void cleanup() {
     if (!resources_freed) {
         if (account_arr) free(account_arr);
@@ -211,7 +207,7 @@ int main(int argc, char* argv[]) {
     pthread_cond_init(&update_cond, NULL);
     pthread_mutex_init(&update_mutex, NULL);
 
-    // Create bank thread FIRST
+    // Create bank thread first
     pthread_t bank_thread;
     printf("[Debug] Creating bank thread\n");
     pthread_create(&bank_thread, NULL, update_balance, NULL);
@@ -246,7 +242,7 @@ int main(int argc, char* argv[]) {
     // Signal bank thread to exit and wait for it
     printf("[Debug] Signaling bank thread to exit\n");
     pthread_mutex_lock(&update_mutex);
-    should_exit = 1;  // Add this as a global variable
+    should_exit = 1;  
     pthread_cond_signal(&update_cond);
     pthread_mutex_unlock(&update_mutex);
     pthread_join(bank_thread, NULL);
