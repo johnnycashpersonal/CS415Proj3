@@ -53,6 +53,7 @@ atomic_int valid_transaction_count = 0;  // Only counts valid non-check transact
 pthread_mutex_t bank_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t bank_cond = PTHREAD_COND_INITIALIZER;
 int bank_ready = 0;
+atomic_int active_threads = NUM_WORKERS;  // Track active threads
 
 void* process_transaction(void* arg);
 void* update_balance(void* arg);
@@ -270,17 +271,10 @@ int main(int argc, char* argv[]) {
 }
 
 void* process_transaction(void* arg) {
-    /* run by worker to handle transaction requests */
     thread_data *data = (thread_data*) arg;
-    static int check_balance_count = 0; // check bal call counter (static to retain val between calls)
-
-    printf("[Debug] Thread %d waiting at barrier\n", 
-           (int)((data->start_index) / (data->end_index - data->start_index)));
+    
     pthread_barrier_wait(&start_barrier);
-    printf("[Debug] Thread %d passed barrier\n", 
-           (int)((data->start_index) / (data->end_index - data->start_index)));
-
-    // run process_trans for each trans in thread range
+    
     for (int i = data->start_index; i < data->end_index; i++) {
         command_line *transaction = &data->transactions[i];
         int src_acc_ind = -1;
@@ -349,23 +343,6 @@ void* process_transaction(void* arg) {
 
             case 'C':
                 // check balance
-                check_balance_count++;
-                if (check_balance_count % 500 == 0) {
-                    // set time val
-                    time_t now = time(NULL);
-                    char time_str[26];
-                    ctime_r(&now, time_str);
-                    time_str[strlen(time_str) - 1] = '\0';
-
-                    // write to pipe for auditor
-                    char message[128];
-                    snprintf(message, sizeof(message), 
-                            "Worker checked balance of Account %s. Balance is $%.2f. Check occured at %s\n",
-                            account_arr[src_acc_ind].account_number,
-                            account_arr[src_acc_ind].balance,
-                            time_str);
-                    write(pipe_fd[1], message, strlen(message));
-                }
                 atomic_fetch_add(&stats.checks, 1);
                 atomic_fetch_add(&stats.total_transactions, 1);
                 break;
@@ -404,7 +381,7 @@ void* process_transaction(void* arg) {
                 pthread_mutex_lock(&bank_mutex);
                 bank_ready = 1;
                 pthread_cond_signal(&bank_cond);
-                while (bank_ready) {  // Wait until bank is done
+                while (bank_ready) {
                     pthread_cond_wait(&bank_cond, &bank_mutex);
                 }
                 pthread_mutex_unlock(&bank_mutex);
@@ -412,8 +389,18 @@ void* process_transaction(void* arg) {
         }
     }
 
-    printf("[Debug] Thread completed all transactions\n");
-    return 0;
+    // Signal that this thread is done
+    int remaining = atomic_fetch_sub(&active_threads, 1) - 1;
+    if (remaining == 0) {
+        // Last thread to finish signals bank for final update
+        pthread_mutex_lock(&bank_mutex);
+        bank_ready = 1;
+        should_exit = 1;
+        pthread_cond_signal(&bank_cond);
+        pthread_mutex_unlock(&bank_mutex);
+    }
+
+    return NULL;
 }
 
 void* update_balance(void* arg) {
@@ -425,32 +412,31 @@ void* update_balance(void* arg) {
             pthread_cond_wait(&bank_cond, &bank_mutex);
         }
         
-        if (should_exit) {
-            pthread_mutex_unlock(&bank_mutex);
-            break;
-        }
-
-        // Update balances
+        // Perform balance updates
         pthread_mutex_lock(&account_mutex);
+        printf("[Debug] Starting balance update cycle\n");
+        
         for (int i = 0; i < NUM_ACCS; i++) {
             double reward = account_arr[i].reward_rate * account_arr[i].transaction_tracter;
             account_arr[i].balance += reward;
             account_arr[i].transaction_tracter = 0;
             
-            // Write to account file
             char filename[32];
             snprintf(filename, sizeof(filename), "Output/act_%d.txt", i);
             FILE* f_out = fopen(filename, "a");
             fprintf(f_out, "%.2f\n", account_arr[i].balance);
             fclose(f_out);
         }
-        pthread_mutex_unlock(&account_mutex);
         
-        bank_ready = 0;  // Reset bank ready flag
-        pthread_cond_broadcast(&bank_cond);  // Wake up all worker threads
+        pthread_mutex_unlock(&account_mutex);
+        atomic_fetch_add(&total_updates, 1);
+        
+        // Signal worker threads to continue
+        bank_ready = 0;
+        pthread_cond_broadcast(&bank_cond);
         pthread_mutex_unlock(&bank_mutex);
         
-        atomic_fetch_add(&total_updates, 1);
+        if (should_exit) break;
     }
     
     return NULL;
