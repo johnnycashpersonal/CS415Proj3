@@ -48,6 +48,9 @@ volatile int should_exit = 0;
 // Add this global variable at the top
 atomic_int total_updates = 0;
 
+// Add to global variables
+atomic_int valid_transactions = 0;  // Only counts valid non-check transactions
+
 void* process_transaction(void* arg);
 void* update_balance(void* arg);
 void auditor_process(int read_fd);
@@ -328,8 +331,8 @@ void* process_transaction(void* arg) {
                 account_arr[src_acc_ind].balance -= trans_amount;
                 account_arr[src_acc_ind].transaction_tracter += trans_amount;
                 account_arr[dst_acc_ind].balance += trans_amount;
-                stats.transfers++;
-                stats.total_transactions++;
+                atomic_fetch_add(&stats.transfers, 1);
+                atomic_fetch_add(&stats.total_transactions, 1);
                 break;
 
             case 'C':
@@ -351,8 +354,8 @@ void* process_transaction(void* arg) {
                             time_str);
                     write(pipe_fd[1], message, strlen(message));
                 }
-                stats.checks++;
-                stats.total_transactions++;
+                atomic_fetch_add(&stats.checks, 1);
+                atomic_fetch_add(&stats.total_transactions, 1);
                 break;
 
             case 'D':
@@ -360,8 +363,8 @@ void* process_transaction(void* arg) {
                 trans_amount = strtod(transaction->command_list[3], NULL);
                 account_arr[src_acc_ind].balance += trans_amount;
                 account_arr[src_acc_ind].transaction_tracter += trans_amount;
-                stats.deposits++;
-                stats.total_transactions++;
+                atomic_fetch_add(&stats.deposits, 1);
+                atomic_fetch_add(&stats.total_transactions, 1);
                 break;
 
             case 'W':
@@ -369,8 +372,8 @@ void* process_transaction(void* arg) {
                 trans_amount = strtod(transaction->command_list[3], NULL);
                 account_arr[src_acc_ind].balance -= trans_amount;
                 account_arr[src_acc_ind].transaction_tracter += trans_amount;
-                stats.withdrawals++;
-                stats.total_transactions++;
+                atomic_fetch_add(&stats.withdrawals, 1);
+                atomic_fetch_add(&stats.total_transactions, 1);
                 break;
 
             default:
@@ -382,23 +385,18 @@ void* process_transaction(void* arg) {
 
         pthread_mutex_unlock(&account_mutex); // unlock after accessing shared data
 
-        if (trans != 'C' && trans != 'I') { // Exclude checks and invalid
-            pthread_mutex_lock(&update_mutex);
-            transactions_processed++;
-            atomic_fetch_add(&total_processed, 1);
+        if (trans != 'C' && trans != 'I') {
+            int current = atomic_fetch_add(&valid_transactions, 1) + 1;
+            printf("[Debug] Valid transactions: %d\n", current);
             
-            printf("[Debug] Transactions processed: %d (Total: %d)\n", 
-                   transactions_processed, atomic_load(&total_processed));
-            
-            if (transactions_processed >= 5000) {
-                printf("[Debug] Thread reached 5000 threshold. Signaling bank thread.\n");
+            if (current % 5000 == 0) {  // Every 5000 transactions
+                pthread_mutex_lock(&update_mutex);
                 update_ready = 1;
+                printf("[Debug] Reached 5000 threshold. Signaling bank thread.\n");
                 pthread_cond_signal(&update_cond);
-                printf("[Debug] Thread waiting for bank update.\n");
                 pthread_cond_wait(&update_cond, &update_mutex);
-                printf("[Debug] Thread resumed after bank update.\n");
+                pthread_mutex_unlock(&update_mutex);
             }
-            pthread_mutex_unlock(&update_mutex);
         }
     }
 
@@ -407,12 +405,10 @@ void* process_transaction(void* arg) {
 }
 
 void* update_balance(void* arg) {
-    printf("[Debug] Bank thread started\n");
-    
-    // Wait at barrier with all other threads
     pthread_barrier_wait(&start_barrier);
+    printf("[Debug] Bank thread started processing\n");
     
-    while (!should_exit) {  // Check for exit condition
+    while (!should_exit) {
         pthread_mutex_lock(&update_mutex);
         while (!update_ready && !should_exit) {
             pthread_cond_wait(&update_cond, &update_mutex);
@@ -423,12 +419,12 @@ void* update_balance(void* arg) {
             break;
         }
 
-        printf("[Debug] Bank thread woke up for update cycle %d\n", 
-               atomic_fetch_add(&update_cycles, 1));
-
-        // Update balances
+        printf("[Debug] Starting balance update cycle\n");
+        pthread_mutex_lock(&account_mutex);  // Lock accounts during update
+        
         for (int i = 0; i < NUM_ACCS; i++) {
-            account_arr[i].balance += (account_arr[i].reward_rate * account_arr[i].transaction_tracter);
+            double reward = account_arr[i].reward_rate * account_arr[i].transaction_tracter;
+            account_arr[i].balance += reward;
             account_arr[i].transaction_tracter = 0;
 
             char filename[32];
@@ -436,21 +432,16 @@ void* update_balance(void* arg) {
             FILE* f_out = fopen(filename, "a");
             fprintf(f_out, "%.2f\n", account_arr[i].balance);
             fclose(f_out);
-            
-            printf("[Debug] Updated account %d\n", i);
         }
-
-        transactions_processed = 0;
+        
+        pthread_mutex_unlock(&account_mutex);
+        atomic_fetch_add(&total_updates, 1);
+        
         update_ready = 0;
-        printf("[Debug] Bank thread broadcasting resume signal\n");
         pthread_cond_broadcast(&update_cond);
         pthread_mutex_unlock(&update_mutex);
-
-        // In update_balance function, add this after updating accounts:
-        atomic_fetch_add(&total_updates, 1);
     }
-
-    printf("[Debug] Bank thread exiting\n");
+    
     return NULL;
 }
 
