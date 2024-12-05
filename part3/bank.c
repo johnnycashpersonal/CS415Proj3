@@ -459,27 +459,49 @@ void* update_balance(void* arg) {
             pthread_cond_wait(&bank_cond, &bank_mutex);
         }
         
-        char time_str[64];
-        format_timestamp(time_str, sizeof(time_str));
+        // Get current time for logging
+        time_t now = time(NULL);
+        char time_str[26];
+        ctime_r(&now, time_str);
+        time_str[strlen(time_str) - 1] = '\0';  // Remove newline
         
         pthread_mutex_lock(&account_mutex);
         
-        // Write interest updates to pipe
+        // Open ledger file in append mode
+        FILE *ledger = fopen("Output/ledger.txt", "a");
+        if (!ledger) {
+            perror("Failed to open ledger.txt");
+            pthread_mutex_unlock(&account_mutex);
+            pthread_mutex_unlock(&bank_mutex);
+            continue;
+        }
+        
+        // Process each account
         for (int i = 0; i < NUM_ACCS; i++) {
+            // Calculate and apply interest
             double reward = account_arr[i].reward_rate * account_arr[i].transaction_tracter;
             account_arr[i].balance += reward;
             account_arr[i].transaction_tracter = 0;
             
-            char buffer[256];
-            snprintf(buffer, sizeof(buffer),
-                    "Applied Interest to account %s. New Balance: $%.2f. Time of Update: %s\n",
+            // Log with line number
+            int line_num = atomic_fetch_add(&ledger_line_count, 1) + 1;
+            fprintf(ledger, "%d Applied Interest to account %s. New Balance: $%.2f. Time of Update: %s\n",
+                    line_num,
                     account_arr[i].account_number,
                     account_arr[i].balance,
                     time_str);
-            write(pipe_fd[1], buffer, strlen(buffer));
+            
+            // Write to individual account file
+            char filename[32];
+            snprintf(filename, sizeof(filename), "Output/act_%d.txt", i);
+            FILE* f_out = fopen(filename, "a");
+            fprintf(f_out, "%.2f\n", account_arr[i].balance);
+            fclose(f_out);
         }
         
+        fclose(ledger);
         pthread_mutex_unlock(&account_mutex);
+        
         atomic_fetch_add(&total_updates, 1);
         
         bank_ready = 0;
