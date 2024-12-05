@@ -272,77 +272,80 @@ int main(int argc, char* argv[]) {
 
 void* process_transaction(void* arg) {
     thread_data *data = (thread_data*) arg;
-    
     pthread_barrier_wait(&start_barrier);
-    
+
     for (int i = data->start_index; i < data->end_index; i++) {
         command_line *transaction = &data->transactions[i];
         int src_acc_ind = -1;
         int dst_acc_ind = -1;
         double trans_amount = -1;
+        int valid_transaction = 0;
 
-        pthread_mutex_lock(&account_mutex); // lock before accessing shared data
+        pthread_mutex_lock(&account_mutex);
 
-        // get account index for account_arr
+        // Find source account
         for (int j = 0; j < NUM_ACCS; j++) {
             if (strcmp(account_arr[j].account_number, transaction->command_list[1]) == 0) {
                 src_acc_ind = j;
                 break;
             }
         }
+
         if (src_acc_ind == -1) {
+            printf("[Debug] Source account not found: %s\n", transaction->command_list[1]);
             stats.invalid_transactions++;
             pthread_mutex_unlock(&account_mutex);
             continue;
         }
 
-        // Add transaction validation before processing
-        if (transaction->command_list[0][0] == 'W' || transaction->command_list[0][0] == 'T') {
-            trans_amount = strtod(transaction->command_list[3], NULL);
-            if (account_arr[src_acc_ind].balance < trans_amount) {
-                stats.invalid_transactions++;
-                pthread_mutex_unlock(&account_mutex);
-                continue;
-            }
-        }
-
-        // check password
+        // Check password
         if (strcmp(account_arr[src_acc_ind].password, transaction->command_list[2]) != 0) {
-            pthread_mutex_unlock(&account_mutex); // unlock if password doesn't match (restarting loop)
+            printf("[Debug] Invalid password for account: %s\n", account_arr[src_acc_ind].account_number);
+            stats.invalid_transactions++;
+            pthread_mutex_unlock(&account_mutex);
             continue;
         }
 
-        // do the transaction
+        // Process transaction
         char trans = transaction->command_list[0][0];
         switch (trans) {
             case 'T':
-                // Find destination account first
+                // Find destination account
                 for (int j = 0; j < NUM_ACCS; j++) {
                     if (strcmp(account_arr[j].account_number, transaction->command_list[3]) == 0) {
                         dst_acc_ind = j;
                         break;
                     }
                 }
-                
-                if (dst_acc_ind != -1) {  // Found destination account
+
+                if (dst_acc_ind != -1) {
                     trans_amount = strtod(transaction->command_list[4], NULL);
                     if (account_arr[src_acc_ind].balance >= trans_amount) {
                         account_arr[src_acc_ind].balance -= trans_amount;
-                        account_arr[src_acc_ind].transaction_tracter += trans_amount;
                         account_arr[dst_acc_ind].balance += trans_amount;
+                        account_arr[src_acc_ind].transaction_tracter += trans_amount;
                         atomic_fetch_add(&stats.transfers, 1);
                         atomic_fetch_add(&stats.total_transactions, 1);
-                        atomic_fetch_add(&valid_transaction_count, 1);
+                        valid_transaction = 1;
+                        printf("[Debug] Transfer successful: %s to %s, Amount: %.2f\n",
+                               account_arr[src_acc_ind].account_number,
+                               account_arr[dst_acc_ind].account_number,
+                               trans_amount);
                     } else {
+                        printf("[Debug] Insufficient funds for transfer: %s\n", account_arr[src_acc_ind].account_number);
                         atomic_fetch_add(&stats.invalid_transactions, 1);
                     }
                 } else {
+                    printf("[Debug] Destination account not found: %s\n", transaction->command_list[3]);
                     atomic_fetch_add(&stats.invalid_transactions, 1);
                 }
                 break;
 
             case 'C':
                 // check balance
+                printf("[Debug] Balance check for account %s: %.2f\n", 
+                       account_arr[src_acc_ind].account_number,
+                       account_arr[src_acc_ind].balance);
                 atomic_fetch_add(&stats.checks, 1);
                 atomic_fetch_add(&stats.total_transactions, 1);
                 break;
@@ -352,31 +355,48 @@ void* process_transaction(void* arg) {
                 trans_amount = strtod(transaction->command_list[3], NULL);
                 account_arr[src_acc_ind].balance += trans_amount;
                 account_arr[src_acc_ind].transaction_tracter += trans_amount;
+                printf("[Debug] Deposit to account %s: %.2f, New balance: %.2f\n",
+                       account_arr[src_acc_ind].account_number,
+                       trans_amount,
+                       account_arr[src_acc_ind].balance);
                 atomic_fetch_add(&stats.deposits, 1);
                 atomic_fetch_add(&stats.total_transactions, 1);
+                valid_transaction = 1;
                 break;
 
             case 'W':
                 // withdrawal
                 trans_amount = strtod(transaction->command_list[3], NULL);
-                account_arr[src_acc_ind].balance -= trans_amount;
-                account_arr[src_acc_ind].transaction_tracter += trans_amount;
-                atomic_fetch_add(&stats.withdrawals, 1);
-                atomic_fetch_add(&stats.total_transactions, 1);
+                if (account_arr[src_acc_ind].balance >= trans_amount) {
+                    account_arr[src_acc_ind].balance -= trans_amount;
+                    account_arr[src_acc_ind].transaction_tracter += trans_amount;
+                    printf("[Debug] Withdrawal from account %s: %.2f, New balance: %.2f\n",
+                           account_arr[src_acc_ind].account_number,
+                           trans_amount,
+                           account_arr[src_acc_ind].balance);
+                    atomic_fetch_add(&stats.withdrawals, 1);
+                    atomic_fetch_add(&stats.total_transactions, 1);
+                    valid_transaction = 1;
+                } else {
+                    printf("[Debug] Insufficient funds for withdrawal: Account %s, Amount: %.2f, Balance: %.2f\n",
+                           account_arr[src_acc_ind].account_number,
+                           trans_amount,
+                           account_arr[src_acc_ind].balance);
+                    atomic_fetch_add(&stats.invalid_transactions, 1);
+                }
                 break;
 
             default:
+                printf("[Debug] Invalid transaction type: %c\n", trans);
                 stats.invalid_transactions++;
-                printf("Error: Invalid transaction type.\n");
                 pthread_mutex_unlock(&account_mutex);
                 return NULL;
         }
 
-        pthread_mutex_unlock(&account_mutex); // unlock after accessing shared data
+        pthread_mutex_unlock(&account_mutex);
 
-        if (trans != 'C' && trans != 'I') {
+        if (valid_transaction && trans != 'C') {
             int current = atomic_fetch_add(&valid_transaction_count, 1) + 1;
-            
             if (current % 5000 == 0) {
                 pthread_mutex_lock(&bank_mutex);
                 bank_ready = 1;
@@ -392,7 +412,6 @@ void* process_transaction(void* arg) {
     // Signal that this thread is done
     int remaining = atomic_fetch_sub(&active_threads, 1) - 1;
     if (remaining == 0) {
-        // Last thread to finish signals bank for final update
         pthread_mutex_lock(&bank_mutex);
         bank_ready = 1;
         should_exit = 1;
