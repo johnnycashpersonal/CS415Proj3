@@ -45,6 +45,9 @@ atomic_int update_cycles = 0;
 
 volatile int should_exit = 0;
 
+// Add this global variable at the top
+atomic_int total_updates = 0;
+
 void* process_transaction(void* arg);
 void* update_balance(void* arg);
 void auditor_process(int read_fd);
@@ -240,6 +243,23 @@ int main(int argc, char* argv[]) {
     pthread_cond_destroy(&update_cond);
     pthread_mutex_destroy(&update_mutex);
 
+    struct timeval end_time;
+    gettimeofday(&end_time, NULL);
+    long total_time = (end_time.tv_sec - start_time.tv_sec) * 1000 + 
+                     (end_time.tv_usec - start_time.tv_usec) / 1000;
+
+    printf("\nProgram Statistics (Total time: %ld ms):\n", total_time);
+    printf("----------------------------------------\n");
+    printf("Total Transactions Processed: %d\n", stats.total_transactions);
+    printf("Invalid Transactions Caught: %d\n", stats.invalid_transactions);
+    printf("Successful Transfers: %d\n", stats.transfers);
+    printf("Successful Deposits: %d\n", stats.deposits);
+    printf("Successful Withdrawals: %d\n", stats.withdrawals);
+    printf("Balance Checks Performed: %d\n", stats.checks);
+    printf("Total Balance Updates: %d\n", atomic_load(&total_updates));
+    printf("----------------------------------------\n");
+    printf("Program completed successfully.\n\n");
+
     return 0;
 }
 
@@ -425,6 +445,9 @@ void* update_balance(void* arg) {
         printf("[Debug] Bank thread broadcasting resume signal\n");
         pthread_cond_broadcast(&update_cond);
         pthread_mutex_unlock(&update_mutex);
+
+        // In update_balance function, add this after updating accounts:
+        atomic_fetch_add(&total_updates, 1);
     }
 
     printf("[Debug] Bank thread exiting\n");
