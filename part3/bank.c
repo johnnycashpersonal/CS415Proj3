@@ -58,6 +58,9 @@ atomic_int active_threads = NUM_WORKERS;  // Track active threads
 // Add to global variables at the top
 atomic_int ledger_line_count = 0;
 
+// Add global counter for balance checks
+atomic_int check_counter = 0;
+
 void* process_transaction(void* arg);
 void* update_balance(void* arg);
 void auditor_process(int read_fd);
@@ -346,30 +349,30 @@ void* process_transaction(void* arg) {
 
             case 'C':
                 {
-                    // Get current time
-                    time_t now = time(NULL);
-                    char time_str[26];
-                    ctime_r(&now, time_str);
-                    time_str[strlen(time_str) - 1] = '\0';  // Remove newline
-                    
-                    // Open ledger file in append mode
-                    FILE *ledger = fopen("Output/ledger.txt", "a");
-                    if (ledger) {
-                        int line_num = atomic_fetch_add(&ledger_line_count, 1) + 1;
-                        fprintf(ledger, "%d Worker checked balance of Account %s. Balance is $%.2f. Check occurred at %s\n",
-                                line_num,
+                    int current_check = atomic_fetch_add(&check_counter, 1) + 1;
+                    if (current_check % 500 == 0) {  // Only log every 500th check
+                        char time_str[64];
+                        format_timestamp(time_str, sizeof(time_str));
+                        
+                        // Write to pipe instead of directly to file
+                        char buffer[256];
+                        snprintf(buffer, sizeof(buffer), 
+                                "Worker checked balance of Account %s. Balance is $%.2f. Check occurred at %s\n",
                                 account_arr[src_acc_ind].account_number,
                                 account_arr[src_acc_ind].balance,
                                 time_str);
-                        fclose(ledger);
-                        
-                        // Add debug output to track line count
-                        printf("[Debug] Ledger line count: %d\n", line_num);
+                        write(pipe_fd[1], buffer, strlen(buffer));
+
+                        // Signal bank thread to log interest updates
+                        pthread_mutex_lock(&bank_mutex);
+                        bank_ready = 1;
+                        pthread_cond_signal(&bank_cond);
+                        while (bank_ready) {
+                            pthread_cond_wait(&bank_cond, &bank_mutex);
+                        }
+                        pthread_mutex_unlock(&bank_mutex);
                     }
                     
-                    printf("[Debug] Balance check for account %s: %.2f\n",
-                           account_arr[src_acc_ind].account_number,
-                           account_arr[src_acc_ind].balance);
                     atomic_fetch_add(&stats.checks, 1);
                     atomic_fetch_add(&stats.total_transactions, 1);
                 }
@@ -456,50 +459,27 @@ void* update_balance(void* arg) {
             pthread_cond_wait(&bank_cond, &bank_mutex);
         }
         
-        // Get current time for logging
-        time_t now = time(NULL);
-        char time_str[26];
-        ctime_r(&now, time_str);
-        time_str[strlen(time_str) - 1] = '\0';  // Remove newline
+        char time_str[64];
+        format_timestamp(time_str, sizeof(time_str));
         
         pthread_mutex_lock(&account_mutex);
-        printf("[Debug] Starting balance update cycle\n");
         
-        // Open ledger file in append mode
-        FILE *ledger = fopen("Output/ledger.txt", "a");
-        if (!ledger) {
-            perror("Failed to open ledger.txt");
-            pthread_mutex_unlock(&account_mutex);
-            pthread_mutex_unlock(&bank_mutex);
-            continue;
-        }
-        
-        // Process each account
+        // Write interest updates to pipe
         for (int i = 0; i < NUM_ACCS; i++) {
-            // Calculate and apply interest
             double reward = account_arr[i].reward_rate * account_arr[i].transaction_tracter;
             account_arr[i].balance += reward;
             account_arr[i].transaction_tracter = 0;
             
-            // Log with line number
-            int line_num = atomic_fetch_add(&ledger_line_count, 1) + 1;
-            fprintf(ledger, "%d Applied Interest to account %s. New Balance: $%.2f. Time of Update: %s\n",
-                    line_num,
+            char buffer[256];
+            snprintf(buffer, sizeof(buffer),
+                    "Applied Interest to account %s. New Balance: $%.2f. Time of Update: %s\n",
                     account_arr[i].account_number,
                     account_arr[i].balance,
                     time_str);
-            
-            // Write to individual account file
-            char filename[32];
-            snprintf(filename, sizeof(filename), "Output/act_%d.txt", i);
-            FILE* f_out = fopen(filename, "a");
-            fprintf(f_out, "%.2f\n", account_arr[i].balance);
-            fclose(f_out);
+            write(pipe_fd[1], buffer, strlen(buffer));
         }
         
-        fclose(ledger);
         pthread_mutex_unlock(&account_mutex);
-        
         atomic_fetch_add(&total_updates, 1);
         
         bank_ready = 0;
