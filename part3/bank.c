@@ -55,6 +55,9 @@ pthread_cond_t bank_cond = PTHREAD_COND_INITIALIZER;
 int bank_ready = 0;
 atomic_int active_threads = NUM_WORKERS;  // Track active threads
 
+// Add to global variables at the top
+atomic_int ledger_line_count = 0;
+
 void* process_transaction(void* arg);
 void* update_balance(void* arg);
 void auditor_process(int read_fd);
@@ -352,11 +355,16 @@ void* process_transaction(void* arg) {
                     // Open ledger file in append mode
                     FILE *ledger = fopen("Output/ledger.txt", "a");
                     if (ledger) {
-                        fprintf(ledger, "Worker checked balance of Account %s. Balance is $%.2f. Check occurred at %s\n",
+                        int line_num = atomic_fetch_add(&ledger_line_count, 1) + 1;
+                        fprintf(ledger, "%d Worker checked balance of Account %s. Balance is $%.2f. Check occurred at %s\n",
+                                line_num,
                                 account_arr[src_acc_ind].account_number,
                                 account_arr[src_acc_ind].balance,
                                 time_str);
                         fclose(ledger);
+                        
+                        // Add debug output to track line count
+                        printf("[Debug] Ledger line count: %d\n", line_num);
                     }
                     
                     printf("[Debug] Balance check for account %s: %.2f\n",
@@ -473,8 +481,10 @@ void* update_balance(void* arg) {
             account_arr[i].balance += reward;
             account_arr[i].transaction_tracter = 0;
             
-            // Log interest application to ledger
-            fprintf(ledger, "Applied Interest to account %s. New Balance: $%.2f. Time of Update: %s\n",
+            // Log with line number
+            int line_num = atomic_fetch_add(&ledger_line_count, 1) + 1;
+            fprintf(ledger, "%d Applied Interest to account %s. New Balance: $%.2f. Time of Update: %s\n",
+                    line_num,
                     account_arr[i].account_number,
                     account_arr[i].balance,
                     time_str);
