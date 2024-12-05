@@ -319,20 +319,29 @@ void* process_transaction(void* arg) {
         char trans = transaction->command_list[0][0];
         switch (trans) {
             case 'T':
-                // transfer
+                // Find destination account first
                 for (int j = 0; j < NUM_ACCS; j++) {
                     if (strcmp(account_arr[j].account_number, transaction->command_list[3]) == 0) {
                         dst_acc_ind = j;
                         break;
                     }
                 }
-
-                trans_amount = strtod(transaction->command_list[4], NULL);
-                account_arr[src_acc_ind].balance -= trans_amount;
-                account_arr[src_acc_ind].transaction_tracter += trans_amount;
-                account_arr[dst_acc_ind].balance += trans_amount;
-                atomic_fetch_add(&stats.transfers, 1);
-                atomic_fetch_add(&stats.total_transactions, 1);
+                
+                if (dst_acc_ind != -1) {  // Found destination account
+                    trans_amount = strtod(transaction->command_list[4], NULL);
+                    if (account_arr[src_acc_ind].balance >= trans_amount) {
+                        account_arr[src_acc_ind].balance -= trans_amount;
+                        account_arr[src_acc_ind].transaction_tracter += trans_amount;
+                        account_arr[dst_acc_ind].balance += trans_amount;
+                        atomic_fetch_add(&stats.transfers, 1);
+                        atomic_fetch_add(&stats.total_transactions, 1);
+                        atomic_fetch_add(&valid_transactions, 1);
+                    } else {
+                        atomic_fetch_add(&stats.invalid_transactions, 1);
+                    }
+                } else {
+                    atomic_fetch_add(&stats.invalid_transactions, 1);
+                }
                 break;
 
             case 'C':
