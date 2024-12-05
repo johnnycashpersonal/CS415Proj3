@@ -1,4 +1,3 @@
-#define _XOPEN_SOURCE 600
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,16 +12,12 @@
 
 #define INITIAL_SIZE 16
 #define NUM_WORKERS 10
-#define TRANSACTION_THRESHOLD 5000
 
 int NUM_ACCS = 0;
 account *account_arr;
 command_line *cmd_arr;
 pthread_mutex_t account_mutex;
 int resources_freed = 0;  // Track if resources have been freed
-pthread_cond_t worker_cond = PTHREAD_COND_INITIALIZER;
-pthread_cond_t bank_cond = PTHREAD_COND_INITIALIZER;
-int bank_updating = 0;
 
 typedef struct {
     command_line *transactions;
@@ -36,6 +31,12 @@ int pipe_fd[2];
 stats_t stats = {0}; // Initialize all stats to 0
 
 struct timeval start_time;
+
+pthread_barrier_t start_barrier;
+pthread_cond_t update_cond;
+pthread_mutex_t update_mutex;
+int transactions_processed = 0;
+int update_ready = 0;
 
 void* process_transaction(void* arg);
 void* update_balance(void* arg);
@@ -180,15 +181,11 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Create bank thread BEFORE worker threads
-    pthread_t bank_thread;
-    pthread_create(&bank_thread, NULL, update_balance, NULL);
-
-    // Initialize barrier for synchronized start
-    pthread_barrier_t start_barrier;
     pthread_barrier_init(&start_barrier, NULL, NUM_WORKERS + 1);
+    pthread_cond_init(&update_cond, NULL);
+    pthread_mutex_init(&update_mutex, NULL);
 
-    // Create worker threads
+    // create worker threads
     pthread_t worker_threads[NUM_WORKERS];
     thread_data worker_data[NUM_WORKERS];
     int transactions_per_worker = num_transactions / NUM_WORKERS;
@@ -206,6 +203,9 @@ int main(int argc, char* argv[]) {
         pthread_create(&worker_threads[i], NULL, process_transaction, &worker_data[i]);
     }
 
+    // Wait for all threads to be ready
+    pthread_barrier_wait(&start_barrier);
+
     print_elapsed_time("Waiting for all threads to complete");
 
     // wait for all worker threads to finish
@@ -218,7 +218,9 @@ int main(int argc, char* argv[]) {
 
     print_elapsed_time("All workers finished. Creating bank thread to update balances");
 
-    pthread_barrier_wait(&start_barrier);  // Signal threads to start
+    // create bank thread
+    pthread_t bank_thread;
+    pthread_create(&bank_thread, NULL, update_balance, NULL);
 
     // wait for bank thread to finish
     pthread_join(bank_thread, NULL);
@@ -247,30 +249,30 @@ int main(int argc, char* argv[]) {
     free(account_arr);
     free(cmd_arr);
     pthread_mutex_destroy(&account_mutex);
+    pthread_barrier_destroy(&start_barrier);
+    pthread_cond_destroy(&update_cond);
+    pthread_mutex_destroy(&update_mutex);
 
     return 0;
 }
 
 void* process_transaction(void* arg) {
+    /* run by worker to handle transaction requests */
     thread_data *data = (thread_data*) arg;
-    static int check_balance_count = 0;
+    static int check_balance_count = 0; // check bal call counter (static to retain val between calls)
 
+    pthread_barrier_wait(&start_barrier);
+
+    // run process_trans for each trans in thread range
     for (int i = data->start_index; i < data->end_index; i++) {
-        // Check if bank is updating - if so, wait
-        pthread_mutex_lock(&transaction_mutex);
-        while (bank_updating) {
-            pthread_cond_wait(&worker_cond, &transaction_mutex);
-        }
-        pthread_mutex_unlock(&transaction_mutex);
-
         command_line *transaction = &data->transactions[i];
         int src_acc_ind = -1;
         int dst_acc_ind = -1;
         double trans_amount = -1;
 
-        pthread_mutex_lock(&account_mutex);
+        pthread_mutex_lock(&account_mutex); // lock before accessing shared data
 
-        // Find source account
+        // get account index for account_arr
         for (int j = 0; j < NUM_ACCS; j++) {
             if (strcmp(account_arr[j].account_number, transaction->command_list[1]) == 0) {
                 src_acc_ind = j;
@@ -283,7 +285,7 @@ void* process_transaction(void* arg) {
             continue;
         }
 
-        // Validate transaction amount
+        // Add transaction validation before processing
         if (transaction->command_list[0][0] == 'W' || transaction->command_list[0][0] == 'T') {
             trans_amount = strtod(transaction->command_list[3], NULL);
             if (account_arr[src_acc_ind].balance < trans_amount) {
@@ -293,47 +295,43 @@ void* process_transaction(void* arg) {
             }
         }
 
-        // Validate password
+        // check password
         if (strcmp(account_arr[src_acc_ind].password, transaction->command_list[2]) != 0) {
-            pthread_mutex_unlock(&account_mutex);
+            pthread_mutex_unlock(&account_mutex); // unlock if password doesn't match (restarting loop)
             continue;
         }
 
-        // Process transaction
+        // do the transaction
         char trans = transaction->command_list[0][0];
         switch (trans) {
             case 'T':
+                // transfer
                 for (int j = 0; j < NUM_ACCS; j++) {
                     if (strcmp(account_arr[j].account_number, transaction->command_list[3]) == 0) {
                         dst_acc_ind = j;
                         break;
                     }
                 }
+
                 trans_amount = strtod(transaction->command_list[4], NULL);
                 account_arr[src_acc_ind].balance -= trans_amount;
                 account_arr[src_acc_ind].transaction_tracter += trans_amount;
                 account_arr[dst_acc_ind].balance += trans_amount;
                 stats.transfers++;
                 stats.total_transactions++;
-                
-                // Check threshold after non-check transaction
-                int curr_trans = atomic_fetch_add(&processed_transactions, 1);
-                if (curr_trans + 1 >= TRANSACTION_THRESHOLD) {
-                    pthread_mutex_lock(&transaction_mutex);
-                    bank_updating = 1;
-                    pthread_cond_signal(&bank_cond);
-                    pthread_mutex_unlock(&transaction_mutex);
-                }
                 break;
 
             case 'C':
+                // check balance
                 check_balance_count++;
                 if (check_balance_count % 500 == 0) {
+                    // set time val
                     time_t now = time(NULL);
                     char time_str[26];
                     ctime_r(&now, time_str);
                     time_str[strlen(time_str) - 1] = '\0';
 
+                    // write to pipe for auditor
                     char message[128];
                     snprintf(message, sizeof(message), 
                             "Worker checked balance of Account %s. Balance is $%.2f. Check occured at %s\n",
@@ -347,37 +345,21 @@ void* process_transaction(void* arg) {
                 break;
 
             case 'D':
+                // deposit
                 trans_amount = strtod(transaction->command_list[3], NULL);
                 account_arr[src_acc_ind].balance += trans_amount;
                 account_arr[src_acc_ind].transaction_tracter += trans_amount;
                 stats.deposits++;
                 stats.total_transactions++;
-                
-                // Check threshold after non-check transaction
-                curr_trans = atomic_fetch_add(&processed_transactions, 1);
-                if (curr_trans + 1 >= TRANSACTION_THRESHOLD) {
-                    pthread_mutex_lock(&transaction_mutex);
-                    bank_updating = 1;
-                    pthread_cond_signal(&bank_cond);
-                    pthread_mutex_unlock(&transaction_mutex);
-                }
                 break;
 
             case 'W':
+                // withdrawal
                 trans_amount = strtod(transaction->command_list[3], NULL);
                 account_arr[src_acc_ind].balance -= trans_amount;
                 account_arr[src_acc_ind].transaction_tracter += trans_amount;
                 stats.withdrawals++;
                 stats.total_transactions++;
-                
-                // Check threshold after non-check transaction
-                curr_trans = atomic_fetch_add(&processed_transactions, 1);
-                if (curr_trans + 1 >= TRANSACTION_THRESHOLD) {
-                    pthread_mutex_lock(&transaction_mutex);
-                    bank_updating = 1;
-                    pthread_cond_signal(&bank_cond);
-                    pthread_mutex_unlock(&transaction_mutex);
-                }
                 break;
 
             default:
@@ -387,41 +369,50 @@ void* process_transaction(void* arg) {
                 return NULL;
         }
 
-        pthread_mutex_unlock(&account_mutex);
+        pthread_mutex_unlock(&account_mutex); // unlock after accessing shared data
+
+        if (trans != 'C' && trans != 'I') { // Exclude checks and invalid
+            pthread_mutex_lock(&update_mutex);
+            transactions_processed++;
+            if (transactions_processed >= 5000) {
+                update_ready = 1;
+                pthread_cond_signal(&update_cond);
+                pthread_cond_wait(&update_cond, &update_mutex);
+            }
+            pthread_mutex_unlock(&update_mutex);
+        }
     }
 
-    return NULL;
+    return 0;
 }
 
 void* update_balance(void* arg) {
-    pthread_barrier_wait(&start_barrier);
-    
     while (1) {
-        // Wait for signal from workers
-        pthread_mutex_lock(&transaction_mutex);
-        while (!bank_updating) {
-            pthread_cond_wait(&bank_cond, &transaction_mutex);
+        pthread_mutex_lock(&update_mutex);
+        while (!update_ready) {
+            pthread_cond_wait(&update_cond, &update_mutex);
         }
-        
-        // Update balances and create individual files
+
+        // Update balances
         for (int i = 0; i < NUM_ACCS; i++) {
+            account_arr[i].balance += (account_arr[i].reward_rate * account_arr[i].transaction_tracter);
+            account_arr[i].transaction_tracter = 0;
+
+            // Write to individual account files
             char filename[32];
             snprintf(filename, sizeof(filename), "Output/act_%d.txt", i);
             FILE* f_out = fopen(filename, "a");
-            
-            account_arr[i].balance += (account_arr[i].reward_rate * account_arr[i].transaction_tracter);
-            fprintf(f_out, "Balance: %.2f\n", account_arr[i].balance);
-            account_arr[i].transaction_tracter = 0;
+            fprintf(f_out, "%.2f\n", account_arr[i].balance);
             fclose(f_out);
         }
-        
-        // Reset and signal workers
-        atomic_store(&processed_transactions, 0);
-        bank_updating = 0;
-        pthread_cond_broadcast(&worker_cond);
-        pthread_mutex_unlock(&transaction_mutex);
+
+        transactions_processed = 0;
+        update_ready = 0;
+        pthread_cond_broadcast(&update_cond);
+        pthread_mutex_unlock(&update_mutex);
     }
-    return NULL;
+
+    return 0;
 }
 
 void auditor_process(int read_fd) {
@@ -440,35 +431,4 @@ void auditor_process(int read_fd) {
     }
 
     fclose(ledger);
-}
-
-// Add this barrier implementation
-typedef struct {
-    pthread_mutex_t mutex;
-    pthread_cond_t cond;
-    int count;
-    int tripCount;
-} barrier_t;
-
-barrier_t barrier;
-atomic_int processed_transactions = 0;
-pthread_mutex_t transaction_mutex = PTHREAD_MUTEX_INITIALIZER;
-
-void barrier_init(barrier_t *barrier, int count) {
-    pthread_mutex_init(&barrier->mutex, NULL);
-    pthread_cond_init(&barrier->cond, NULL);
-    barrier->tripCount = count;
-    barrier->count = 0;
-}
-
-void barrier_wait(barrier_t *barrier) {
-    pthread_mutex_lock(&barrier->mutex);
-    barrier->count++;
-    if (barrier->count == barrier->tripCount) {
-        barrier->count = 0;
-        pthread_cond_broadcast(&barrier->cond);
-    } else {
-        pthread_cond_wait(&barrier->cond, &barrier->mutex);
-    }
-    pthread_mutex_unlock(&barrier->mutex);
 }
