@@ -43,6 +43,8 @@ atomic_int total_processed = 0;
 atomic_int barrier_wait_count = 0;
 atomic_int update_cycles = 0;
 
+volatile int should_exit = 0;
+
 void* process_transaction(void* arg);
 void* update_balance(void* arg);
 void auditor_process(int read_fd);
@@ -162,6 +164,7 @@ int main(int argc, char* argv[]) {
 
     command_line *transactions = NULL;
     int num_transactions = 0;
+    int transactions_per_worker = 0;
 
     gettimeofday(&start_time, NULL);
 
@@ -182,81 +185,55 @@ int main(int argc, char* argv[]) {
             // use rest of cmd_arr for transaction arr
             transactions = &cmd_arr[i];
             num_transactions = num_lines - i;
+            transactions_per_worker = num_transactions / NUM_WORKERS;
             break;
         }
     }
 
     printf("[Debug] Initializing synchronization primitives\n");
-    pthread_barrier_init(&start_barrier, NULL, NUM_WORKERS + 1);
+    pthread_barrier_init(&start_barrier, NULL, NUM_WORKERS + 2);
     pthread_cond_init(&update_cond, NULL);
     pthread_mutex_init(&update_mutex, NULL);
 
-    // Create bank thread first
+    // Create bank thread FIRST
     pthread_t bank_thread;
     printf("[Debug] Creating bank thread\n");
     pthread_create(&bank_thread, NULL, update_balance, NULL);
 
-    // create worker threads
+    // Create worker threads
     pthread_t worker_threads[NUM_WORKERS];
     thread_data worker_data[NUM_WORKERS];
-    int transactions_per_worker = num_transactions / NUM_WORKERS;
-
-    // assign start, end indices and transaction vals to thread data
+    
     for (int i = 0; i < NUM_WORKERS; i++) {
         worker_data[i].transactions = transactions;
         worker_data[i].start_index = i * transactions_per_worker;
         worker_data[i].end_index = (i == NUM_WORKERS - 1) ? num_transactions : (i + 1) * transactions_per_worker;
 
-        char msg[100];
-        snprintf(msg, sizeof(msg), "Creating worker thread %d to process transactions %d-%d", 
+        printf("[Debug] Creating worker thread %d to process transactions %d-%d\n", 
                 i, worker_data[i].start_index, worker_data[i].end_index);
-        print_elapsed_time(msg);
         pthread_create(&worker_threads[i], NULL, process_transaction, &worker_data[i]);
     }
 
+    // Wait at barrier for all threads to be ready
     printf("[Debug] Main thread waiting at barrier\n");
     pthread_barrier_wait(&start_barrier);
     printf("[Debug] All threads have started\n");
 
-    print_elapsed_time("Waiting for all threads to complete");
-
-    // wait for all worker threads to finish
+    // Wait for worker threads to finish
     for (int i = 0; i < NUM_WORKERS; i++) {
         pthread_join(worker_threads[i], NULL);
-        char msg[100];
-        snprintf(msg, sizeof(msg), "Worker thread %d is finished", i);
-        print_elapsed_time(msg);
+        printf("[%ldms] Worker thread %d is finished\n", get_elapsed_time(), i);
     }
 
-    print_elapsed_time("All workers finished. Creating bank thread to update balances");
-
-    // wait for bank thread to finish
+    // Signal bank thread to exit and wait for it
+    printf("[Debug] Signaling bank thread to exit\n");
+    pthread_mutex_lock(&update_mutex);
+    should_exit = 1;  // Add this as a global variable
+    pthread_cond_signal(&update_cond);
+    pthread_mutex_unlock(&update_mutex);
     pthread_join(bank_thread, NULL);
 
-    print_elapsed_time("All balances updated.");
-
-    // Get final elapsed time for statistics
-    struct timeval end_time;
-    gettimeofday(&end_time, NULL);
-    long total_time = (end_time.tv_sec - start_time.tv_sec) * 1000 + 
-                     (end_time.tv_usec - start_time.tv_usec) / 1000;
-
-    printf("\nProgram Statistics (Total time: %ld ms):\n", total_time);
-    printf("----------------------------------------\n");
-    printf("Total Transactions Processed: %d\n", stats.total_transactions);
-    printf("Invalid Transactions Caught: %d\n", stats.invalid_transactions);
-    printf("Successful Transfers: %d\n", stats.transfers);
-    printf("Successful Deposits: %d\n", stats.deposits);
-    printf("Successful Withdrawals: %d\n", stats.withdrawals);
-    printf("Balance Checks Performed: %d\n", stats.checks);
-    printf("----------------------------------------\n");
-    printf("Total Balance Updates: 1\n");
-    printf("Program completed successfully.\n\n");
-
-    resources_freed = 1;  // Mark resources as freed
-    free(account_arr);
-    free(cmd_arr);
-    pthread_mutex_destroy(&account_mutex);
+    // Cleanup
     pthread_barrier_destroy(&start_barrier);
     pthread_cond_destroy(&update_cond);
     pthread_mutex_destroy(&update_mutex);
@@ -410,12 +387,18 @@ void* process_transaction(void* arg) {
 void* update_balance(void* arg) {
     printf("[Debug] Bank thread started\n");
     
-    while (1) {
+    // Wait at barrier with all other threads
+    pthread_barrier_wait(&start_barrier);
+    
+    while (!should_exit) {  // Check for exit condition
         pthread_mutex_lock(&update_mutex);
-        printf("[Debug] Bank thread waiting for update signal\n");
-        
-        while (!update_ready) {
+        while (!update_ready && !should_exit) {
             pthread_cond_wait(&update_cond, &update_mutex);
+        }
+
+        if (should_exit) {
+            pthread_mutex_unlock(&update_mutex);
+            break;
         }
 
         printf("[Debug] Bank thread woke up for update cycle %d\n", 
@@ -442,7 +425,8 @@ void* update_balance(void* arg) {
         pthread_mutex_unlock(&update_mutex);
     }
 
-    return 0;
+    printf("[Debug] Bank thread exiting\n");
+    return NULL;
 }
 
 void auditor_process(int read_fd) {
