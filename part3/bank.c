@@ -61,8 +61,6 @@ atomic_int ledger_line_count = 0;
 // Add global counter for balance checks
 atomic_int check_counter = 0;
 
-// Add to function declarations
-void format_timestamp(char* buffer, size_t size);
 void* process_transaction(void* arg);
 void* update_balance(void* arg);
 void auditor_process(int read_fd);
@@ -276,12 +274,6 @@ int main(int argc, char* argv[]) {
     printf("Program completed successfully.\n\n");
 
     return 0;
-}
-
-void format_timestamp(char* buffer, size_t size) {
-    time_t now = time(NULL);
-    struct tm *tm_info = localtime(&now);
-    strftime(buffer, size, "%a %b %e %H:%M:%S %Y", tm_info);
 }
 
 void* process_transaction(void* arg) {
