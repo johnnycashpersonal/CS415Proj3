@@ -222,7 +222,9 @@ int main(int argc, char* argv[]) {
     // Wait for worker threads to finish
     for (int i = 0; i < NUM_WORKERS; i++) {
         pthread_join(worker_threads[i], NULL);
-        printf("[%ldms] Worker thread %d is finished\n", get_elapsed_time(), i);
+        char msg[100];
+        snprintf(msg, sizeof(msg), "Worker thread %d is finished", i);
+        print_elapsed_time(msg);
     }
 
     // Signal bank thread to exit and wait for it
