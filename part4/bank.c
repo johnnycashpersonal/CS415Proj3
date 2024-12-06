@@ -611,6 +611,13 @@ int puddles_bank_process() {
     for (int i = 0; i < shared_data->num_accounts; i++) {
         shared_data->accounts[i].balance *= 0.2;  // 20% of Duck Bank balance
         shared_data->accounts[i].reward_rate = 0.02;  // 2% flat rate
+        
+        // Write initial account header to each file
+        char filename[64];
+        snprintf(filename, sizeof(filename), "savings/act_%d.txt", i);
+        FILE* f_out = fopen(filename, "w");  // Use "w" to create/overwrite file
+        fprintf(f_out, "account: %d\n", i);
+        fclose(f_out);
     }
     
     // Monitor for updates from Duck Bank
@@ -624,12 +631,12 @@ int puddles_bank_process() {
                 // Apply 2% interest to the entire balance
                 shared_data->accounts[i].balance *= 1.02;
                 
-                // Write to savings output file
+                // Write to savings output file (append mode)
                 char filename[64];
                 snprintf(filename, sizeof(filename), "savings/act_%d.txt", i);
-                FILE* f_out = fopen(filename, "a");
-                fprintf(f_out, "account: %d\nCurrent Savings Balance  %.2f\n", 
-                        i, shared_data->accounts[i].balance);
+                FILE* f_out = fopen(filename, "a");  // Use "a" to append
+                fprintf(f_out, "Current Savings Balance  %.2f\n", 
+                        shared_data->accounts[i].balance);
                 fclose(f_out);
             }
             last_update_count = current_count;
