@@ -405,6 +405,10 @@ void* process_transaction(void* arg) {
                                account_arr[src_acc_ind].account_number,
                                account_arr[dst_acc_ind].account_number,
                                trans_amount);
+                        
+                        // Add Puddles Bank transaction tracker update
+                        shared_bank_data *shared_data = (shared_bank_data *)shared_memory;
+                        shared_data->accounts[src_acc_ind].transaction_tracter += trans_amount;
                     } else {
                         printf("[Debug] Insufficient funds for transfer: %s\n", account_arr[src_acc_ind].account_number);
                         atomic_fetch_add(&stats.invalid_transactions, 1);
@@ -461,6 +465,10 @@ void* process_transaction(void* arg) {
                 atomic_fetch_add(&stats.deposits, 1);
                 atomic_fetch_add(&stats.total_transactions, 1);
                 valid_transaction = 1;
+                
+                // Add Puddles Bank transaction tracker update
+                shared_bank_data *shared_data = (shared_bank_data *)shared_memory;
+                shared_data->accounts[src_acc_ind].transaction_tracter += trans_amount;
                 break;
 
             case 'W':
@@ -476,6 +484,10 @@ void* process_transaction(void* arg) {
                     atomic_fetch_add(&stats.withdrawals, 1);
                     atomic_fetch_add(&stats.total_transactions, 1);
                     valid_transaction = 1;
+                    
+                    // Add Puddles Bank transaction tracker update
+                    shared_bank_data *shared_data = (shared_bank_data *)shared_memory;
+                    shared_data->accounts[src_acc_ind].transaction_tracter += trans_amount;
                 } else {
                     printf("[Debug] Insufficient funds for withdrawal: Account %s, Amount: %.2f, Balance: %.2f\n",
                            account_arr[src_acc_ind].account_number,
@@ -612,7 +624,8 @@ int puddles_bank_process() {
             for (int i = 0; i < shared_data->num_accounts; i++) {
                 // Apply 2% interest to transaction tracker
                 double reward = 0.02 * shared_data->accounts[i].transaction_tracter;
-                shared_data->accounts[i].balance += reward;
+                shared_data->accounts[i].balance *= 1.02;  // Apply 2% to entire balance
+                shared_data->accounts[i].balance += reward;  // Add transaction reward
                 shared_data->accounts[i].transaction_tracter = 0;
                 
                 // Write to savings output file
