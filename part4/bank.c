@@ -74,6 +74,7 @@ atomic_int check_counter = 0;
 
 atomic_int last_update_count = 0;
 
+int puddles_bank_process(void);
 void* process_transaction(void* arg);
 void* update_balance(void* arg);
 void auditor_process(int read_fd);
@@ -260,8 +261,6 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Copy initial account data to shared memory
-    shared_bank_data *shared_data = (shared_bank_data *)shared_memory;
     memcpy(shared_data->accounts, account_arr, sizeof(account) * NUM_ACCS);
     shared_data->num_accounts = NUM_ACCS;
     atomic_store(&shared_data->update_counter, 0);
