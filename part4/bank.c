@@ -70,9 +70,9 @@ int shared_mem_fd;
 void* process_transaction(void* arg);
 void* update_balance(void* arg);
 void auditor_process(int read_fd);
-void setup_shared_memory();
-void cleanup_shared_memory();
-void puddles_bank_process();
+void setup_shared_memory(int num_accounts);
+void cleanup_shared_memory(size_t size);
+void puddles_bank_process(int num_accounts);
 
 // cleanup function
 void cleanup() {
@@ -80,7 +80,7 @@ void cleanup() {
         if (account_arr) free(account_arr);
         if (cmd_arr) free(cmd_arr);
         pthread_mutex_destroy(&account_mutex);
-        cleanup_shared_memory();
+        cleanup_shared_memory(shared_memory_size);
         resources_freed = 1;
     }
 }
@@ -192,7 +192,7 @@ int main(int argc, char* argv[]) {
     account_arr = malloc(sizeof(account) * NUM_ACCS);
 
     // Setup shared memory for Puddles Bank
-    setup_shared_memory();
+    setup_shared_memory(NUM_ACCS);
 
     pthread_mutex_init(&account_mutex, NULL);
 
@@ -239,7 +239,7 @@ int main(int argc, char* argv[]) {
 
     if (puddles_pid == 0) {
         // Child process: Puddles Bank
-        puddles_bank_process();
+        puddles_bank_process(NUM_ACCS);
         exit(0);
     }
 
@@ -582,8 +582,8 @@ void auditor_process(int read_fd) {
     fclose(ledger);
 }
 
-void setup_shared_memory() {
-    shared_memory_size = sizeof(shared_account_info_t) * NUM_ACCS;
+void setup_shared_memory(int num_accounts) {
+    shared_memory_size = sizeof(shared_account_info_t) * num_accounts;
     
     shared_mem_fd = shm_open("/bank_accounts", O_CREAT | O_RDWR, 0666);
     if (shared_mem_fd == -1) {
@@ -604,14 +604,14 @@ void setup_shared_memory() {
     }
 }
 
-void cleanup_shared_memory() {
+void cleanup_shared_memory(size_t size) {
     if (shared_accounts != MAP_FAILED && shared_accounts != NULL) {
-        munmap(shared_accounts, shared_memory_size);
+        munmap(shared_accounts, size);
         shm_unlink("/bank_accounts");
     }
 }
 
-void puddles_bank_process() {
+void puddles_bank_process(int num_accounts) {
     // Create savings directory
     if (mkdir("savings", 0777) == -1 && errno != EEXIST) {
         perror("Failed to create savings directory");
@@ -619,7 +619,7 @@ void puddles_bank_process() {
     }
 
     // Initialize savings accounts
-    for (int i = 0; i < NUM_ACCS; i++) {
+    for (int i = 0; i < num_accounts; i++) {
         shared_accounts[i].current_balance = shared_accounts[i].initial_balance * INITIAL_SAVINGS_PERCENTAGE;
         shared_accounts[i].needs_update = false;
         
@@ -636,7 +636,7 @@ void puddles_bank_process() {
     // Monitor for updates
     while (!should_exit) {
         bool updates_needed = false;
-        for (int i = 0; i < NUM_ACCS; i++) {
+        for (int i = 0; i < num_accounts; i++) {
             if (atomic_load(&shared_accounts[i].needs_update)) {
                 updates_needed = true;
                 break;
@@ -644,7 +644,7 @@ void puddles_bank_process() {
         }
 
         if (updates_needed) {
-            for (int i = 0; i < NUM_ACCS; i++) {
+            for (int i = 0; i < num_accounts; i++) {
                 if (atomic_load(&shared_accounts[i].needs_update)) {
                     double current_balance = shared_accounts[i].current_balance;
                     double interest = current_balance * SAVINGS_REWARD_RATE;
