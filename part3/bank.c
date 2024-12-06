@@ -65,12 +65,7 @@ void auditor_process(int read_fd);
 void cleanup() {
     if (!resources_freed) {
         if (account_arr) free(account_arr);
-        if (cmd_arr) {
-            for (int i = 0; i < NUM_ACCS * 5; i++) {  // Free account setup commands
-                free_command_line(&cmd_arr[i]);
-            }
-            free(cmd_arr);
-        }
+        if (cmd_arr) free(cmd_arr);
         pthread_mutex_destroy(&account_mutex);
         resources_freed = 1;
     }
@@ -115,29 +110,17 @@ command_line* read_file_to_command_lines(const char* filename, int* num_lines) {
             capacity *= 2;
             command_line* temp = realloc(cmd_array, sizeof(command_line) * capacity);
             if (temp == NULL) {
-                // Free previously allocated command lines
-                for (int i = 0; i < *num_lines; i++) {
-                    free_command_line(&cmd_array[i]);
-                }
-                free(cmd_array);
+                perror("Memory allocation failed");
                 free(line);
                 fclose(file);
+                free(cmd_array);
                 exit(1);
             }
             cmd_array = temp;
         }
 
+        // tokenize the line and store it in cmd_array
         cmd_array[*num_lines] = str_filler(line, " ");
-        if (cmd_array[*num_lines].command_list == NULL) {
-            // Handle str_filler failure
-            for (int i = 0; i < *num_lines; i++) {
-                free_command_line(&cmd_array[i]);
-            }
-            free(cmd_array);
-            free(line);
-            fclose(file);
-            exit(1);
-        }
         (*num_lines)++;
     }
 
@@ -295,11 +278,6 @@ int main(int argc, char* argv[]) {
     printf("----------------------------------------\n");
     printf("Program completed successfully.\n\n");
 
-    // Add these before return
-    pthread_mutex_destroy(&bank_mutex);
-    pthread_cond_destroy(&bank_cond);
-    
-    cleanup();  // Call cleanup explicitly
     return 0;
 }
 
@@ -561,13 +539,4 @@ void auditor_process(int read_fd) {
     }
 
     fclose(ledger);
-}
-
-void free_command_line(command_line* cmd) {
-    if (cmd) {
-        for (int i = 0; i < cmd->num_token; i++) {
-            free(cmd->command_list[i]);
-        }
-        free(cmd->command_list);
-    }
 }
