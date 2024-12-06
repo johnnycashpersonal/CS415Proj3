@@ -304,10 +304,11 @@ int main(int argc, char* argv[]) {
 
     // Signal bank thread to exit and wait for it
     printf("[Debug] Signaling bank thread to exit\n");
-    pthread_mutex_lock(&update_mutex);
-    atomic_store(&shared_data->should_exit, 1);  // Set shared exit flag
-    pthread_cond_signal(&update_cond);
-    pthread_mutex_unlock(&update_mutex);
+    pthread_mutex_lock(&bank_mutex);  // Change from update_mutex to bank_mutex
+    bank_ready = 1;  // Add this line
+    atomic_store(&shared_data->should_exit, 1);
+    pthread_cond_signal(&bank_cond);  // Change from update_cond to bank_cond
+    pthread_mutex_unlock(&bank_mutex);
     pthread_join(bank_thread, NULL);
 
     // Wait for child processes
@@ -539,6 +540,7 @@ void* process_transaction(void* arg) {
     return NULL;
 }
 
+// And in update_balance(), modify the exit check:
 void* update_balance(void* arg) {
     pthread_barrier_wait(&start_barrier);
     shared_bank_data *shared_data = (shared_bank_data *)shared_memory;
@@ -547,6 +549,11 @@ void* update_balance(void* arg) {
         pthread_mutex_lock(&bank_mutex);
         while (!bank_ready && !atomic_load(&shared_data->should_exit)) {
             pthread_cond_wait(&bank_cond, &bank_mutex);
+        }
+        
+        if (atomic_load(&shared_data->should_exit)) {
+            pthread_mutex_unlock(&bank_mutex);  // Add this line
+            break;
         }
         
         // Get current time for logging
