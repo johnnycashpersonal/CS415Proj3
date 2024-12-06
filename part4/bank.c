@@ -244,14 +244,14 @@ int main(int argc, char* argv[]) {
     }
 
     // Parent process continues with Duck Bank operations
-    printf("[Debug] Initializing synchronization primitives\n");
+    //printf("[Debug] Initializing synchronization primitives\n");
     pthread_barrier_init(&start_barrier, NULL, NUM_WORKERS + 2);
     pthread_cond_init(&update_cond, NULL);
     pthread_mutex_init(&update_mutex, NULL);
 
     // Create bank thread
     pthread_t bank_thread;
-    printf("[Debug] Creating bank thread\n");
+    //printf("[Debug] Creating bank thread\n");
     pthread_create(&bank_thread, NULL, update_balance, NULL);
 
     // Create worker threads
@@ -263,15 +263,15 @@ int main(int argc, char* argv[]) {
         worker_data[i].start_index = i * transactions_per_worker;
         worker_data[i].end_index = (i == NUM_WORKERS - 1) ? num_transactions : (i + 1) * transactions_per_worker;
 
-        printf("[Debug] Creating worker thread %d to process transactions %d-%d\n", 
-                i, worker_data[i].start_index, worker_data[i].end_index);
+        //printf("[Debug] Creating worker thread %d to process transactions %d-%d\n", 
+        //        i, worker_data[i].start_index, worker_data[i].end_index);
         pthread_create(&worker_threads[i], NULL, process_transaction, &worker_data[i]);
     }
 
     // Wait at barrier for all threads to be ready
-    printf("[Debug] Main thread waiting at barrier\n");
+    //printf("[Debug] Main thread waiting at barrier\n");
     pthread_barrier_wait(&start_barrier);
-    printf("[Debug] All threads have started\n");
+    //printf("[Debug] All threads have started\n");
 
     // Wait for worker threads to finish
     for (int i = 0; i < NUM_WORKERS; i++) {
@@ -282,7 +282,7 @@ int main(int argc, char* argv[]) {
     }
 
     // Signal bank thread to exit and wait for it
-    printf("[Debug] Signaling bank thread to exit\n");
+    //printf("[Debug] Signaling bank thread to exit\n");
     pthread_mutex_lock(&bank_mutex);
     should_exit = 1;
     bank_ready = 1;
@@ -292,12 +292,12 @@ int main(int argc, char* argv[]) {
     // Add a small delay to ensure the signal is processed
     usleep(1000);
     
-    printf("[Debug] Waiting for bank thread to join\n");
+    //printf("[Debug] Waiting for bank thread to join\n");
     pthread_join(bank_thread, NULL);
-    printf("[Debug] Bank thread joined successfully\n");
+    //printf("[Debug] Bank thread joined successfully\n");
 
     // Signal Puddles Bank to exit and wait for it
-    printf("[Debug] Signaling Puddles Bank to exit\n");
+    //printf("[Debug] Signaling Puddles Bank to exit\n");
     should_exit = 1;  // Make sure this is visible to Puddles Bank
     
     // Wait for Puddles Bank with timeout
@@ -306,7 +306,7 @@ int main(int argc, char* argv[]) {
     timeout.tv_sec = time(NULL) + 5;  // 5 second timeout
     timeout.tv_nsec = 0;
     
-    printf("[Debug] Waiting for Puddles Bank to finish\n");
+    //printf("[Debug] Waiting for Puddles Bank to finish\n");
     if (waitpid(puddles_pid, &status, WNOHANG) == 0) {
         kill(puddles_pid, SIGTERM);  // Send termination signal if still running
         waitpid(puddles_pid, NULL, 0);  // Wait for actual termination
@@ -360,7 +360,7 @@ void* process_transaction(void* arg) {
         }
 
         if (src_acc_ind == -1) {
-            printf("[Debug] Source account not found: %s\n", transaction->command_list[1]);
+            //printf("[Debug] Source account not found: %s\n", transaction->command_list[1]);
             stats.invalid_transactions++;
             pthread_mutex_unlock(&account_mutex);
             continue;
@@ -368,7 +368,7 @@ void* process_transaction(void* arg) {
 
         // Check password
         if (strcmp(account_arr[src_acc_ind].password, transaction->command_list[2]) != 0) {
-            printf("[Debug] Invalid password for account: %s\n", account_arr[src_acc_ind].account_number);
+            //printf("[Debug] Invalid password for account: %s\n", account_arr[src_acc_ind].account_number);
             stats.invalid_transactions++;
             pthread_mutex_unlock(&account_mutex);
             continue;
@@ -395,16 +395,16 @@ void* process_transaction(void* arg) {
                         atomic_fetch_add(&stats.transfers, 1);
                         atomic_fetch_add(&stats.total_transactions, 1);
                         valid_transaction = 1;
-                        printf("[Debug] Transfer successful: %s to %s, Amount: %.2f\n",
-                               account_arr[src_acc_ind].account_number,
-                               account_arr[dst_acc_ind].account_number,
-                               trans_amount);
+                        //printf("[Debug] Transfer successful: %s to %s, Amount: %.2f\n",
+                        //       account_arr[src_acc_ind].account_number,
+                        //       account_arr[dst_acc_ind].account_number,
+                        //       trans_amount);
                     } else {
-                        printf("[Debug] Insufficient funds for transfer: %s\n", account_arr[src_acc_ind].account_number);
+                        //printf("[Debug] Insufficient funds for transfer: %s\n", account_arr[src_acc_ind].account_number);
                         atomic_fetch_add(&stats.invalid_transactions, 1);
                     }
                 } else {
-                    printf("[Debug] Destination account not found: %s\n", transaction->command_list[3]);
+                    //printf("[Debug] Destination account not found: %s\n", transaction->command_list[3]);
                     atomic_fetch_add(&stats.invalid_transactions, 1);
                 }
                 break;
@@ -435,9 +435,9 @@ void* process_transaction(void* arg) {
                         }
                     }
                     
-                    printf("[Debug] Balance check for account %s: %.2f\n",
-                           account_arr[src_acc_ind].account_number,
-                           account_arr[src_acc_ind].balance);
+                    //printf("[Debug] Balance check for account %s: %.2f\n",
+                    //       account_arr[src_acc_ind].account_number,
+                    //       account_arr[src_acc_ind].balance);
                     atomic_fetch_add(&stats.checks, 1);
                     atomic_fetch_add(&stats.total_transactions, 1);
                 }
@@ -448,10 +448,10 @@ void* process_transaction(void* arg) {
                 trans_amount = strtod(transaction->command_list[3], NULL);
                 account_arr[src_acc_ind].balance += trans_amount;
                 account_arr[src_acc_ind].transaction_tracter += trans_amount;
-                printf("[Debug] Deposit to account %s: %.2f, New balance: %.2f\n",
-                       account_arr[src_acc_ind].account_number,
-                       trans_amount,
-                       account_arr[src_acc_ind].balance);
+                //printf("[Debug] Deposit to account %s: %.2f, New balance: %.2f\n",
+                //       account_arr[src_acc_ind].account_number,
+                //       trans_amount,
+                //       account_arr[src_acc_ind].balance);
                 atomic_fetch_add(&stats.deposits, 1);
                 atomic_fetch_add(&stats.total_transactions, 1);
                 valid_transaction = 1;
@@ -463,24 +463,24 @@ void* process_transaction(void* arg) {
                 if (account_arr[src_acc_ind].balance >= trans_amount) {
                     account_arr[src_acc_ind].balance -= trans_amount;
                     account_arr[src_acc_ind].transaction_tracter += trans_amount;
-                    printf("[Debug] Withdrawal from account %s: %.2f, New balance: %.2f\n",
-                           account_arr[src_acc_ind].account_number,
-                           trans_amount,
-                           account_arr[src_acc_ind].balance);
+                    //printf("[Debug] Withdrawal from account %s: %.2f, New balance: %.2f\n",
+                    //       account_arr[src_acc_ind].account_number,
+                    //       trans_amount,
+                    //       account_arr[src_acc_ind].balance);
                     atomic_fetch_add(&stats.withdrawals, 1);
                     atomic_fetch_add(&stats.total_transactions, 1);
                     valid_transaction = 1;
                 } else {
-                    printf("[Debug] Insufficient funds for withdrawal: Account %s, Amount: %.2f, Balance: %.2f\n",
-                           account_arr[src_acc_ind].account_number,
-                           trans_amount,
-                           account_arr[src_acc_ind].balance);
+                    //printf("[Debug] Insufficient funds for withdrawal: Account %s, Amount: %.2f, Balance: %.2f\n",
+                    //       account_arr[src_acc_ind].account_number,
+                    //       trans_amount,
+                    //       account_arr[src_acc_ind].balance);
                     atomic_fetch_add(&stats.invalid_transactions, 1);
                 }
                 break;
 
             default:
-                printf("[Debug] Invalid transaction type: %c\n", trans);
+                //printf("[Debug] Invalid transaction type: %c\n", trans);
                 stats.invalid_transactions++;
                 pthread_mutex_unlock(&account_mutex);
                 return NULL;
@@ -526,7 +526,7 @@ void* update_balance(void* arg) {
         
         if (should_exit) {
             pthread_mutex_unlock(&bank_mutex);
-            printf("[Debug] Bank thread exiting\n");
+            //printf("[Debug] Bank thread exiting\n");
             break;
         }
         
@@ -537,7 +537,7 @@ void* update_balance(void* arg) {
         time_str[strlen(time_str) - 1] = '\0';  // Remove newline
         
         pthread_mutex_lock(&account_mutex);
-        printf("[Debug] Starting balance update cycle\n");
+        //printf("[Debug] Starting balance update cycle\n");
         
         // Open ledger file in append mode
         FILE *ledger = fopen("Output/ledger.txt", "a");
@@ -693,10 +693,10 @@ void puddles_bank_process(int num_accounts) {
         
         // Check for exit signal
         if (should_exit) {
-            printf("[Debug] Puddles Bank process exiting\n");
+            //printf("[Debug] Puddles Bank process exiting\n");
             break;
         }
     }
     
-    printf("[Debug] Puddles Bank cleanup complete\n");
+    //printf("[Debug] Puddles Bank cleanup complete\n");
 }
