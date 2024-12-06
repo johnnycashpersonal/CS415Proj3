@@ -257,6 +257,15 @@ int main(int argc, char* argv[]) {
     long total_time = (end_time.tv_sec - start_time.tv_sec) * 1000 + 
                      (end_time.tv_usec - start_time.tv_usec) / 1000;
 
+    // Add this block to write final balances to output.txt
+    FILE* f_out = fopen("Output/output.txt", "w");
+    if (f_out) {
+        for (int i = 0; i < NUM_ACCS; i++) {
+            fprintf(f_out, "%d balance:  %.2f\n", i, account_arr[i].balance);
+        }
+        fclose(f_out);
+    }
+
     printf("\nProgram Statistics (Total time: %ld ms):\n", total_time);
     printf("----------------------------------------\n");
     printf("Total Transactions Processed: %d\n", stats.total_transactions);
