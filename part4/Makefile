@@ -12,5 +12,5 @@ bank: $(OBJ)
 	mkdir -p output
 
 clean:
-	rm -f *.o bank output.txt
-	rm -rf output/
+	rm -f *.o bank Output.txt
+	rm -rf Output/
