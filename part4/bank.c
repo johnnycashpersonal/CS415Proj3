@@ -296,8 +296,22 @@ int main(int argc, char* argv[]) {
     pthread_join(bank_thread, NULL);
     printf("[Debug] Bank thread joined successfully\n");
 
-    // Wait for Puddles Bank to finish
-    waitpid(puddles_pid, NULL, 0);
+    // Signal Puddles Bank to exit and wait for it
+    printf("[Debug] Signaling Puddles Bank to exit\n");
+    should_exit = 1;  // Make sure this is visible to Puddles Bank
+    
+    // Wait for Puddles Bank with timeout
+    int status;
+    struct timespec timeout;
+    timeout.tv_sec = time(NULL) + 5;  // 5 second timeout
+    timeout.tv_nsec = 0;
+    
+    printf("[Debug] Waiting for Puddles Bank to finish\n");
+    if (waitpid(puddles_pid, &status, WNOHANG) == 0) {
+        kill(puddles_pid, SIGTERM);  // Send termination signal if still running
+        waitpid(puddles_pid, NULL, 0);  // Wait for actual termination
+    }
+    printf("[Debug] Puddles Bank process finished\n");
 
     // Cleanup
     pthread_barrier_destroy(&start_barrier);
@@ -647,14 +661,14 @@ void puddles_bank_process(int num_accounts) {
     // Monitor for updates
     while (!should_exit) {
         bool updates_needed = false;
-        for (int i = 0; i < num_accounts; i++) {
+        for (int i = 0; i < num_accounts && !should_exit; i++) {
             if (atomic_load(&shared_accounts[i].needs_update)) {
                 updates_needed = true;
                 break;
             }
         }
 
-        if (updates_needed) {
+        if (updates_needed && !should_exit) {
             for (int i = 0; i < num_accounts; i++) {
                 if (atomic_load(&shared_accounts[i].needs_update)) {
                     double current_balance = shared_accounts[i].current_balance;
@@ -674,6 +688,15 @@ void puddles_bank_process(int num_accounts) {
                 }
             }
         }
+        
         usleep(1000); // Small delay to prevent busy waiting
+        
+        // Check for exit signal
+        if (should_exit) {
+            printf("[Debug] Puddles Bank process exiting\n");
+            break;
+        }
     }
+    
+    printf("[Debug] Puddles Bank cleanup complete\n");
 }
