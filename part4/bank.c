@@ -304,24 +304,17 @@ int main(int argc, char* argv[]) {
 
         // Signal bank thread to exit and wait for it
     printf("[Debug] Signaling bank thread to exit\n");
-    pthread_mutex_lock(&bank_mutex);
-    bank_ready = 1;
-    atomic_store(&shared_data->should_exit, 1);
-    pthread_cond_broadcast(&bank_cond);  // Changed from signal to broadcast
-    pthread_mutex_unlock(&bank_mutex);
-
-    // Add a small delay to ensure the signal is processed
-    usleep(1000);  // 1ms delay
-
-    // Wait for bank thread to finish
-    printf("[Debug] Waiting for bank thread to join\n");
+    pthread_mutex_lock(&update_mutex);  // Use update_mutex instead of bank_mutex
+    shared_data->should_exit = 1;  
+    pthread_cond_signal(&update_cond);  // Use update_cond instead of bank_cond
+    pthread_mutex_unlock(&update_mutex);
     pthread_join(bank_thread, NULL);
     printf("[Debug] Bank thread joined successfully\n");
 
     // Wait for child processes
     int status;
-    waitpid(bank_pid, &status, 0);    // Wait for Puddles Bank
-    waitpid(auditor_pid, &status, 0);  // Wait for Auditor
+    waitpid(bank_pid, &status, 0);
+    waitpid(auditor_pid, &status, 0);
 
     // Cleanup
     pthread_barrier_destroy(&start_barrier);
@@ -552,17 +545,15 @@ void* update_balance(void* arg) {
     pthread_barrier_wait(&start_barrier);
     shared_bank_data *shared_data = (shared_bank_data *)shared_memory;
     
-    while (1) {
+    while (!atomic_load(&shared_data->should_exit)) {
         pthread_mutex_lock(&bank_mutex);
-        
-        // Wait for work or exit signal
-        while (!bank_ready) {
-            if (atomic_load(&shared_data->should_exit)) {
-                pthread_mutex_unlock(&bank_mutex);
-                printf("[Debug] Bank thread received exit signal, breaking loop\n");
-                return NULL;
-            }
+        while (!bank_ready && !atomic_load(&shared_data->should_exit)) {
             pthread_cond_wait(&bank_cond, &bank_mutex);
+        }
+        
+        if (atomic_load(&shared_data->should_exit) && !bank_ready) {
+            pthread_mutex_unlock(&bank_mutex);
+            break;
         }
         
         // Process update cycle
@@ -620,11 +611,6 @@ void* update_balance(void* arg) {
         bank_ready = 0;
         pthread_cond_broadcast(&bank_cond);
         pthread_mutex_unlock(&bank_mutex);
-        
-        if (atomic_load(&shared_data->should_exit)) {
-            printf("[Debug] Bank thread received exit signal after update, breaking loop\n");
-            break;
-        }
     }
     
     printf("[Debug] Bank thread exiting\n");
