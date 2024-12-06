@@ -283,10 +283,11 @@ int main(int argc, char* argv[]) {
 
     // Signal bank thread to exit and wait for it
     printf("[Debug] Signaling bank thread to exit\n");
-    pthread_mutex_lock(&update_mutex);
-    should_exit = 1;  
-    pthread_cond_signal(&update_cond);
-    pthread_mutex_unlock(&update_mutex);
+    pthread_mutex_lock(&bank_mutex);
+    should_exit = 1;
+    bank_ready = 1;
+    pthread_cond_signal(&bank_cond);
+    pthread_mutex_unlock(&bank_mutex);
     pthread_join(bank_thread, NULL);
 
     // Wait for Puddles Bank to finish
@@ -497,10 +498,15 @@ void* process_transaction(void* arg) {
 void* update_balance(void* arg) {
     pthread_barrier_wait(&start_barrier);
     
-    while (!should_exit) {
+    while (1) {
         pthread_mutex_lock(&bank_mutex);
         while (!bank_ready && !should_exit) {
             pthread_cond_wait(&bank_cond, &bank_mutex);
+        }
+        
+        if (should_exit) {
+            pthread_mutex_unlock(&bank_mutex);
+            break;
         }
         
         // Get current time for logging
@@ -557,8 +563,6 @@ void* update_balance(void* arg) {
         for (int i = 0; i < NUM_ACCS; i++) {
             atomic_store(&shared_accounts[i].needs_update, true);
         }
-        
-        if (should_exit) break;
     }
     
     return NULL;
