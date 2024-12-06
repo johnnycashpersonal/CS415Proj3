@@ -7,11 +7,17 @@
 #include <sys/stat.h>
 #include <errno.h>
 #include <stdatomic.h>
+#include <sys/mman.h>
+#include <fcntl.h>
 #include "account.h"
 #include "string_parser.h"
+#include <stdbool.h>
+#include <sys/wait.h>
 
 #define INITIAL_SIZE 16
 #define NUM_WORKERS 10
+#define SAVINGS_REWARD_RATE 0.02
+#define INITIAL_SAVINGS_PERCENTAGE 0.20
 
 int NUM_ACCS = 0;
 account *account_arr;
@@ -57,9 +63,16 @@ atomic_int ledger_line_count = 0;
 
 atomic_int check_counter = 0;
 
+shared_account_info_t* shared_accounts = NULL;
+size_t shared_memory_size;
+int shared_mem_fd;
+
 void* process_transaction(void* arg);
 void* update_balance(void* arg);
 void auditor_process(int read_fd);
+void setup_shared_memory();
+void cleanup_shared_memory();
+void puddles_bank_process();
 
 // cleanup function
 void cleanup() {
@@ -67,6 +80,7 @@ void cleanup() {
         if (account_arr) free(account_arr);
         if (cmd_arr) free(cmd_arr);
         pthread_mutex_destroy(&account_mutex);
+        cleanup_shared_memory();
         resources_freed = 1;
     }
 }
@@ -136,20 +150,25 @@ int main(int argc, char* argv[]) {
         exit(1);
     }
 
+    // Create Output and savings directories
     if (mkdir("Output", 0777) == -1 && errno != EEXIST) {
         perror("Failed to create Output directory");
+        exit(1);
+    }
+    if (mkdir("savings", 0777) == -1 && errno != EEXIST) {
+        perror("Failed to create savings directory");
         exit(1);
     }
 
     atexit(cleanup);
 
-    /* process input file and do bank stuff */
-    // fork auditor process
-    // Before forking the auditor process
+    // Setup pipe for auditor
     if (pipe(pipe_fd) == -1) {
         perror("pipe creation failed");
         exit(1);
     }
+
+    // Fork auditor process
     pid_t auditor_pid = fork();
     if (auditor_pid == -1) {
         perror("forking error");
@@ -157,44 +176,53 @@ int main(int argc, char* argv[]) {
     }
 
     if (auditor_pid == 0) {
-        // child process: auditor
+        // Child process: auditor
         close(pipe_fd[1]);
         auditor_process(pipe_fd[0]);
         exit(0);
     }
 
-    // parent process: Duck Bank
+    // Parent process: Duck Bank
     close(pipe_fd[0]);
 
+    // Read and process input file
     int num_lines = 0;
-
     command_line *cmd_arr = read_file_to_command_lines(argv[1], &num_lines);
     NUM_ACCS = atoi(cmd_arr[0].command_list[0]);
     account_arr = malloc(sizeof(account) * NUM_ACCS);
 
-    pthread_mutex_init(&account_mutex, NULL); // initialize mutex
+    // Setup shared memory for Puddles Bank
+    setup_shared_memory();
+
+    pthread_mutex_init(&account_mutex, NULL);
 
     command_line *transactions = NULL;
     int num_transactions = 0;
     int transactions_per_worker = 0;
 
     gettimeofday(&start_time, NULL);
-
     print_elapsed_time("Processing transactions (multi-threaded)");
 
+    // Process account information
     for (int i = 1; i < num_lines; i++) {
-        // account block
         if (strcmp(cmd_arr[i].command_list[0], "index") == 0) {
             int acc_i = atoi(cmd_arr[i].command_list[1]);
-            strncpy(account_arr[acc_i].account_number, cmd_arr[++i].command_list[0], 16); // account number
+            
+            // Set up Duck Bank account
+            strncpy(account_arr[acc_i].account_number, cmd_arr[++i].command_list[0], 16);
             account_arr[acc_i].account_number[16] = '\0';
-            strncpy(account_arr[acc_i].password, cmd_arr[++i].command_list[0], 8); // password
+            strncpy(account_arr[acc_i].password, cmd_arr[++i].command_list[0], 8);
             account_arr[acc_i].password[8] = '\0';
-            account_arr[acc_i].balance = strtod(cmd_arr[++i].command_list[0], NULL); // balance
-            account_arr[acc_i].reward_rate = strtod(cmd_arr[++i].command_list[0], NULL); // reward rate
-            account_arr[acc_i].transaction_tracter = 0; // transaction tracter init
+            account_arr[acc_i].balance = strtod(cmd_arr[++i].command_list[0], NULL);
+            account_arr[acc_i].reward_rate = strtod(cmd_arr[++i].command_list[0], NULL);
+            account_arr[acc_i].transaction_tracter = 0;
+
+            // Initialize shared memory for Puddles Bank
+            shared_accounts[acc_i].account_index = acc_i;
+            strncpy(shared_accounts[acc_i].account_number, account_arr[acc_i].account_number, 17);
+            shared_accounts[acc_i].initial_balance = account_arr[acc_i].balance * INITIAL_SAVINGS_PERCENTAGE;
+            atomic_store(&shared_accounts[acc_i].needs_update, false);
         } else {
-            // use rest of cmd_arr for transaction arr
             transactions = &cmd_arr[i];
             num_transactions = num_lines - i;
             transactions_per_worker = num_transactions / NUM_WORKERS;
@@ -202,12 +230,26 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // Fork Puddles Bank process
+    pid_t puddles_pid = fork();
+    if (puddles_pid == -1) {
+        perror("Failed to fork Puddles Bank process");
+        exit(1);
+    }
+
+    if (puddles_pid == 0) {
+        // Child process: Puddles Bank
+        puddles_bank_process();
+        exit(0);
+    }
+
+    // Parent process continues with Duck Bank operations
     printf("[Debug] Initializing synchronization primitives\n");
     pthread_barrier_init(&start_barrier, NULL, NUM_WORKERS + 2);
     pthread_cond_init(&update_cond, NULL);
     pthread_mutex_init(&update_mutex, NULL);
 
-    // Create bank thread first
+    // Create bank thread
     pthread_t bank_thread;
     printf("[Debug] Creating bank thread\n");
     pthread_create(&bank_thread, NULL, update_balance, NULL);
@@ -246,6 +288,9 @@ int main(int argc, char* argv[]) {
     pthread_cond_signal(&update_cond);
     pthread_mutex_unlock(&update_mutex);
     pthread_join(bank_thread, NULL);
+
+    // Wait for Puddles Bank to finish
+    waitpid(puddles_pid, NULL, 0);
 
     // Cleanup
     pthread_barrier_destroy(&start_barrier);
@@ -508,6 +553,11 @@ void* update_balance(void* arg) {
         pthread_cond_broadcast(&bank_cond);
         pthread_mutex_unlock(&bank_mutex);
         
+        // After updating Duck Bank accounts, signal Puddles Bank
+        for (int i = 0; i < NUM_ACCS; i++) {
+            atomic_store(&shared_accounts[i].needs_update, true);
+        }
+        
         if (should_exit) break;
     }
     
@@ -530,4 +580,89 @@ void auditor_process(int read_fd) {
     }
 
     fclose(ledger);
+}
+
+void setup_shared_memory() {
+    shared_memory_size = sizeof(shared_account_info_t) * NUM_ACCS;
+    
+    shared_mem_fd = shm_open("/bank_accounts", O_CREAT | O_RDWR, 0666);
+    if (shared_mem_fd == -1) {
+        perror("shm_open failed");
+        exit(1);
+    }
+    
+    if (ftruncate(shared_mem_fd, shared_memory_size) == -1) {
+        perror("ftruncate failed");
+        exit(1);
+    }
+    
+    shared_accounts = mmap(NULL, shared_memory_size, 
+                          PROT_READ | PROT_WRITE, MAP_SHARED, shared_mem_fd, 0);
+    if (shared_accounts == MAP_FAILED) {
+        perror("mmap failed");
+        exit(1);
+    }
+}
+
+void cleanup_shared_memory() {
+    if (shared_accounts != MAP_FAILED && shared_accounts != NULL) {
+        munmap(shared_accounts, shared_memory_size);
+        shm_unlink("/bank_accounts");
+    }
+}
+
+void puddles_bank_process() {
+    // Create savings directory
+    if (mkdir("savings", 0777) == -1 && errno != EEXIST) {
+        perror("Failed to create savings directory");
+        exit(1);
+    }
+
+    // Initialize savings accounts
+    for (int i = 0; i < NUM_ACCS; i++) {
+        shared_accounts[i].current_balance = shared_accounts[i].initial_balance * INITIAL_SAVINGS_PERCENTAGE;
+        shared_accounts[i].needs_update = false;
+        
+        char filename[64];
+        snprintf(filename, sizeof(filename), "savings/act_%d.txt", i);
+        FILE *f = fopen(filename, "w");
+        if (f) {
+            fprintf(f, "account: %d\n", i);
+            fprintf(f, "Current Savings Balance %.2f\n", shared_accounts[i].current_balance);
+            fclose(f);
+        }
+    }
+
+    // Monitor for updates
+    while (!should_exit) {
+        bool updates_needed = false;
+        for (int i = 0; i < NUM_ACCS; i++) {
+            if (atomic_load(&shared_accounts[i].needs_update)) {
+                updates_needed = true;
+                break;
+            }
+        }
+
+        if (updates_needed) {
+            for (int i = 0; i < NUM_ACCS; i++) {
+                if (atomic_load(&shared_accounts[i].needs_update)) {
+                    double current_balance = shared_accounts[i].current_balance;
+                    double interest = current_balance * SAVINGS_REWARD_RATE;
+                    double new_balance = current_balance + interest;
+                    
+                    shared_accounts[i].current_balance = new_balance;
+                    atomic_store(&shared_accounts[i].needs_update, false);
+                    
+                    char filename[64];
+                    snprintf(filename, sizeof(filename), "savings/act_%d.txt", i);
+                    FILE *f = fopen(filename, "a");
+                    if (f) {
+                        fprintf(f, "Current Savings Balance %.2f\n", new_balance);
+                        fclose(f);
+                    }
+                }
+            }
+        }
+        usleep(1000); // Small delay to prevent busy waiting
+    }
 }
