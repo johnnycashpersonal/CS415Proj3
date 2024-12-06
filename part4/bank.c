@@ -185,6 +185,14 @@ int main(int argc, char* argv[]) {
         exit(1);
     }
 
+    // Initialize shared mutex
+    shared_bank_data *shared_data = (shared_bank_data *)shared_memory;
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
+    pthread_mutex_init(&shared_data->update_mutex, &attr);
+    pthread_mutexattr_destroy(&attr);
+
     // Fork into Duck Bank and Puddles Bank processes
     pid_t bank_pid = fork();
     if (bank_pid == -1) {
@@ -588,9 +596,9 @@ void* update_balance(void* arg) {
 int puddles_bank_process() {
     shared_bank_data *shared_data = (shared_bank_data *)shared_memory;
     
-    // Initialize Puddles accounts with 20% of Duck Bank balances
-    for (int i = 0; i < NUM_ACCS; i++) {
-        shared_data->accounts[i] = account_arr[i];
+    // No need to initialize - data is already in shared memory
+    // Just modify the balances and reward rates
+    for (int i = 0; i < shared_data->num_accounts; i++) {
         shared_data->accounts[i].balance *= 0.2;  // 20% of Duck Bank balance
         shared_data->accounts[i].reward_rate = 0.02;  // 2% flat rate
     }
@@ -602,7 +610,7 @@ int puddles_bank_process() {
         
         // If Duck Bank has updated, update Puddles accounts
         if (current_count > last_update_count) {
-            for (int i = 0; i < NUM_ACCS; i++) {
+            for (int i = 0; i < shared_data->num_accounts; i++) {
                 // Apply 2% interest to transaction tracker
                 double reward = 0.02 * shared_data->accounts[i].transaction_tracter;
                 shared_data->accounts[i].balance += reward;
@@ -612,7 +620,8 @@ int puddles_bank_process() {
                 char filename[64];
                 snprintf(filename, sizeof(filename), "savings/act_%d.txt", i);
                 FILE* f_out = fopen(filename, "a");
-                fprintf(f_out, "%.2f\n", shared_data->accounts[i].balance);
+                fprintf(f_out, "account: %d\nCurrent Savings Balance  %.2f\n", 
+                        i, shared_data->accounts[i].balance);
                 fclose(f_out);
             }
             last_update_count = current_count;
