@@ -38,6 +38,7 @@ typedef struct {
     int num_accounts;
     atomic_int update_counter;
     pthread_mutex_t update_mutex;
+    atomic_int should_exit;
 } shared_bank_data;
 
 // pipe for auditor
@@ -57,9 +58,6 @@ int update_ready = 0;
 atomic_int total_processed = 0;
 atomic_int barrier_wait_count = 0;
 atomic_int update_cycles = 0;
-
-volatile int should_exit = 0;
-
 atomic_int total_updates = 0;
 
 atomic_int valid_transaction_count = 0;  // Only counts valid non-check transactions
@@ -186,13 +184,14 @@ int main(int argc, char* argv[]) {
         exit(1);
     }
 
-    // Initialize shared mutex
+    // Initialize shared mutex and exit flag
     shared_bank_data *shared_data = (shared_bank_data *)shared_memory;
     pthread_mutexattr_t attr;
     pthread_mutexattr_init(&attr);
     pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
     pthread_mutex_init(&shared_data->update_mutex, &attr);
     pthread_mutexattr_destroy(&attr);
+    atomic_store(&shared_data->should_exit, 0);  // Initialize shared exit flag
 
     // Fork into Duck Bank and Puddles Bank processes
     pid_t bank_pid = fork();
@@ -305,10 +304,15 @@ int main(int argc, char* argv[]) {
     // Signal bank thread to exit and wait for it
     printf("[Debug] Signaling bank thread to exit\n");
     pthread_mutex_lock(&update_mutex);
-    should_exit = 1;
+    atomic_store(&shared_data->should_exit, 1);  // Set shared exit flag
     pthread_cond_signal(&update_cond);
     pthread_mutex_unlock(&update_mutex);
     pthread_join(bank_thread, NULL);
+
+    // Wait for child processes
+    int status;
+    waitpid(bank_pid, &status, 0);    // Wait for Puddles Bank
+    waitpid(auditor_pid, &status, 0);  // Wait for Auditor
 
     // Cleanup
     pthread_barrier_destroy(&start_barrier);
@@ -525,7 +529,8 @@ void* process_transaction(void* arg) {
     if (remaining == 0) {
         pthread_mutex_lock(&bank_mutex);
         bank_ready = 1;
-        should_exit = 1;
+        shared_bank_data *shared_data = (shared_bank_data *)shared_memory;
+        atomic_store(&shared_data->should_exit, 1);  // Use shared version instead of local
         pthread_cond_signal(&bank_cond);
         pthread_mutex_unlock(&bank_mutex);
     }
@@ -535,10 +540,11 @@ void* process_transaction(void* arg) {
 
 void* update_balance(void* arg) {
     pthread_barrier_wait(&start_barrier);
+    shared_bank_data *shared_data = (shared_bank_data *)shared_memory;
     
-    while (!should_exit) {
+    while (!atomic_load(&shared_data->should_exit)) {
         pthread_mutex_lock(&bank_mutex);
-        while (!bank_ready && !should_exit) {
+        while (!bank_ready && !atomic_load(&shared_data->should_exit)) {
             pthread_cond_wait(&bank_cond, &bank_mutex);
         }
         
@@ -598,7 +604,7 @@ void* update_balance(void* arg) {
         pthread_cond_broadcast(&bank_cond);
         pthread_mutex_unlock(&bank_mutex);
         
-        if (should_exit) break;
+        if (atomic_load(&shared_data->should_exit)) break;
     }
     
     return NULL;
@@ -642,7 +648,7 @@ int puddles_bank_process() {
     while (1) {
         pthread_mutex_lock(&shared_data->update_mutex);
         int current_count = atomic_load(&shared_data->update_counter);
-        int should_stop = should_exit;
+        int should_stop = atomic_load(&shared_data->should_exit);  // Read from shared memory
         pthread_mutex_unlock(&shared_data->update_mutex);
         
         printf("[Puddles] Current update count: %d, Local count: %d\n", 
@@ -678,7 +684,8 @@ int puddles_bank_process() {
         }
         
         if (should_stop && current_count == local_update_count) {
-            printf("[Puddles] Received exit signal, breaking main loop\n");
+            printf("[Puddles] Received exit signal (count=%d), breaking main loop\n", 
+                   current_count);
             break;
         }
         
