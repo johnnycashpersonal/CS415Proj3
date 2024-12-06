@@ -9,7 +9,7 @@ OBJ = bank.o string_parser.o
 
 bank: $(OBJ)
 	$(CC) -o $@ $^ $(CFLAGS) $(LDFLAGS)
-	mkdir -p output
+	mkdir -p Output
 
 clean:
 	rm -f *.o bank Output.txt
