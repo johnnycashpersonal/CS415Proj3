@@ -302,14 +302,21 @@ int main(int argc, char* argv[]) {
         print_elapsed_time(msg);
     }
 
-    // Signal bank thread to exit and wait for it
+        // Signal bank thread to exit and wait for it
     printf("[Debug] Signaling bank thread to exit\n");
-    pthread_mutex_lock(&bank_mutex);  // Change from update_mutex to bank_mutex
-    bank_ready = 1;  // Add this line
+    pthread_mutex_lock(&bank_mutex);
+    bank_ready = 1;
     atomic_store(&shared_data->should_exit, 1);
-    pthread_cond_signal(&bank_cond);  // Change from update_cond to bank_cond
+    pthread_cond_broadcast(&bank_cond);  // Changed from signal to broadcast
     pthread_mutex_unlock(&bank_mutex);
+
+    // Add a small delay to ensure the signal is processed
+    usleep(1000);  // 1ms delay
+
+    // Wait for bank thread to finish
+    printf("[Debug] Waiting for bank thread to join\n");
     pthread_join(bank_thread, NULL);
+    printf("[Debug] Bank thread joined successfully\n");
 
     // Wait for child processes
     int status;
