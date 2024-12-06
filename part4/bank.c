@@ -532,27 +532,27 @@ void* process_transaction(void* arg) {
         pthread_mutex_lock(&bank_mutex);
         bank_ready = 1;
         shared_bank_data *shared_data = (shared_bank_data *)shared_memory;
-        atomic_store(&shared_data->should_exit, 1);  // Use shared version instead of local
-        pthread_cond_signal(&bank_cond);
+        atomic_store(&shared_data->should_exit, 1);
+        pthread_cond_broadcast(&bank_cond);  // Change signal to broadcast
         pthread_mutex_unlock(&bank_mutex);
     }
 
     return NULL;
 }
 
-// And in update_balance(), modify the exit check:
+// In update_balance(), modify the main loop:
 void* update_balance(void* arg) {
     pthread_barrier_wait(&start_barrier);
     shared_bank_data *shared_data = (shared_bank_data *)shared_memory;
     
-    while (!atomic_load(&shared_data->should_exit)) {
+    while (1) {  // Changed from while (!atomic_load(&shared_data->should_exit))
         pthread_mutex_lock(&bank_mutex);
-        while (!bank_ready && !atomic_load(&shared_data->should_exit)) {
+        while (!bank_ready) {  // Removed the second condition
             pthread_cond_wait(&bank_cond, &bank_mutex);
         }
         
         if (atomic_load(&shared_data->should_exit)) {
-            pthread_mutex_unlock(&bank_mutex);  // Add this line
+            pthread_mutex_unlock(&bank_mutex);
             break;
         }
         
