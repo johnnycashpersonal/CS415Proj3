@@ -606,46 +606,49 @@ void* update_balance(void* arg) {
 
 int puddles_bank_process() {
     shared_bank_data *shared_data = (shared_bank_data *)shared_memory;
-    atomic_int local_update_count = 0;  // Track updates locally
+    int local_update_count = 0;
+    double *savings_balances = malloc(sizeof(double) * shared_data->num_accounts);
     
-    // Initialize balances and reward rates
+    // Initialize balances and files
     for (int i = 0; i < shared_data->num_accounts; i++) {
-        shared_data->accounts[i].balance *= 0.2;  // 20% of Duck Bank balance
-        shared_data->accounts[i].reward_rate = 0.02;  // 2% flat rate
+        // Initialize with 20% of Duck Bank balance
+        savings_balances[i] = shared_data->accounts[i].balance * 0.2;
         
-        // Write initial account header to each file
+        // Create initial file with account header
         char filename[64];
         snprintf(filename, sizeof(filename), "savings/act_%d.txt", i);
-        FILE* f_out = fopen(filename, "w");  // Use "w" to create/overwrite file
+        FILE* f_out = fopen(filename, "w");
         fprintf(f_out, "account: %d\n", i);
+        fprintf(f_out, "Current Savings Balance  %.2f\n", savings_balances[i]);
         fclose(f_out);
     }
     
-    // Monitor for updates from Duck Bank
     while (!should_exit) {
-        pthread_mutex_lock(&shared_data->update_mutex);
-        int current_count = atomic_load(&shared_data->update_counter);
+        int current_count;
         
-        // Only process if we haven't seen this update yet
+        pthread_mutex_lock(&shared_data->update_mutex);
+        current_count = atomic_load(&shared_data->update_counter);
+        pthread_mutex_unlock(&shared_data->update_mutex);
+        
         if (current_count > local_update_count) {
+            // Process new update
             for (int i = 0; i < shared_data->num_accounts; i++) {
-                // Apply 2% interest to the entire balance
-                shared_data->accounts[i].balance *= 1.02;
+                savings_balances[i] *= 1.02;  // Apply 2% interest
                 
-                // Write to savings output file (append mode)
+                // Append new balance to file
                 char filename[64];
                 snprintf(filename, sizeof(filename), "savings/act_%d.txt", i);
-                FILE* f_out = fopen(filename, "a");  // Use "a" to append
-                fprintf(f_out, "Current Savings Balance  %.2f\n", 
-                        shared_data->accounts[i].balance);
+                FILE* f_out = fopen(filename, "a");
+                fprintf(f_out, "Current Savings Balance  %.2f\n", savings_balances[i]);
                 fclose(f_out);
             }
-            local_update_count = current_count;  // Update our local counter
+            local_update_count = current_count;
         }
-        pthread_mutex_unlock(&shared_data->update_mutex);
-        usleep(1000);  // Small sleep to prevent busy waiting
+        
+        usleep(5000);  // Reduced polling frequency
     }
     
+    free(savings_balances);
     return 0;
 }
 
