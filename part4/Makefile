@@ -1,3 +1,6 @@
+all: bank
+	valgrind --leak-check=full --tool=memcheck ./bank input-1.txt > valgrind_log.txt 2>&1
+
 CC = gcc
 CFLAGS = -Wall -pthread -g
 LDFLAGS = -rdynamic
@@ -12,5 +15,5 @@ bank: $(OBJ)
 	mkdir -p Output
 
 clean:
-	rm -f *.o bank Output.txt
+	rm -f *.o bank output.txt valgrind_log.txt
 	rm -rf Output/
