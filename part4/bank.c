@@ -605,58 +605,87 @@ void* update_balance(void* arg) {
 }
 
 int puddles_bank_process() {
+    printf("[Puddles] Starting Puddles Bank process\n");
     shared_bank_data *shared_data = (shared_bank_data *)shared_memory;
     int local_update_count = 0;
     double *savings_balances = malloc(sizeof(double) * shared_data->num_accounts);
     
     // Wait for shared data to be fully initialized
+    printf("[Puddles] Waiting for shared data initialization...\n");
     while (shared_data->num_accounts == 0) {
-        sched_yield();  // Using required function instead of usleep
+        sched_yield();
     }
+    printf("[Puddles] Shared data initialized with %d accounts\n", shared_data->num_accounts);
     
     // Initialize balances and files
     for (int i = 0; i < shared_data->num_accounts; i++) {
         savings_balances[i] = shared_data->accounts[i].balance * 0.2;
+        printf("[Puddles] Initial balance for account %d: %.2f (20%% of %.2f)\n", 
+               i, savings_balances[i], shared_data->accounts[i].balance);
         
         char filename[64];
         snprintf(filename, sizeof(filename), "savings/act_%d.txt", i);
+        printf("[Puddles] Creating initial file: %s\n", filename);
+        
         FILE* f_out = fopen(filename, "w");
         if (f_out) {
             fprintf(f_out, "account: %d\n", i);
             fprintf(f_out, "Current Savings Balance  %.2f\n", savings_balances[i]);
             fclose(f_out);
+            printf("[Puddles] Wrote initial balance for account %d\n", i);
+        } else {
+            printf("[Puddles] ERROR: Could not open file %s: %s\n", filename, strerror(errno));
         }
     }
     
+    printf("[Puddles] Entering main update loop\n");
     while (1) {
         pthread_mutex_lock(&shared_data->update_mutex);
         int current_count = atomic_load(&shared_data->update_counter);
         int should_stop = should_exit;
         pthread_mutex_unlock(&shared_data->update_mutex);
         
+        printf("[Puddles] Current update count: %d, Local count: %d\n", 
+               current_count, local_update_count);
+        
         if (current_count > local_update_count) {
+            printf("[Puddles] Processing update cycle %d\n", current_count);
+            
             for (int i = 0; i < shared_data->num_accounts; i++) {
                 char filename[64];
                 snprintf(filename, sizeof(filename), "savings/act_%d.txt", i);
-                FILE* f_out = fopen(filename, "a");
                 
+                // Store old balance for debugging
+                double old_balance = savings_balances[i];
+                savings_balances[i] *= 1.02;
+                
+                printf("[Puddles] Account %d: %.2f -> %.2f (2%% interest)\n", 
+                       i, old_balance, savings_balances[i]);
+                
+                FILE* f_out = fopen(filename, "a");
                 if (f_out) {
-                    // Apply flat 2% interest rate as specified
-                    savings_balances[i] *= 1.02;
                     fprintf(f_out, "Current Savings Balance  %.2f\n", savings_balances[i]);
                     fclose(f_out);
+                    printf("[Puddles] Updated balance written to %s\n", filename);
+                } else {
+                    printf("[Puddles] ERROR: Could not open file %s: %s\n", 
+                           filename, strerror(errno));
                 }
             }
+            
             local_update_count = current_count;
+            printf("[Puddles] Update cycle %d completed\n", current_count);
         }
         
         if (should_stop && current_count == local_update_count) {
+            printf("[Puddles] Received exit signal, breaking main loop\n");
             break;
         }
         
-        sched_yield();  // Using required function instead of usleep
+        sched_yield();
     }
     
+    printf("[Puddles] Cleaning up and exiting\n");
     free(savings_balances);
     return 0;
 }
