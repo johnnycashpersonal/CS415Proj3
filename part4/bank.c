@@ -555,36 +555,20 @@ void* update_balance(void* arg) {
     while (1) {
         pthread_mutex_lock(&bank_mutex);
         
-        // Check exit condition first
-        if (atomic_load(&shared_data->should_exit) && !bank_ready) {
-            pthread_mutex_unlock(&bank_mutex);
-            printf("[Debug] Bank thread received exit signal, breaking loop\n");
-            break;
-        }
-        
         // Wait for work or exit signal
-        while (!bank_ready && !atomic_load(&shared_data->should_exit)) {
+        while (!bank_ready) {
+            if (atomic_load(&shared_data->should_exit)) {
+                pthread_mutex_unlock(&bank_mutex);
+                printf("[Debug] Bank thread received exit signal, breaking loop\n");
+                return NULL;
+            }
             pthread_cond_wait(&bank_cond, &bank_mutex);
-        }
-        
-        // Check exit condition again after wait
-        if (atomic_load(&shared_data->should_exit) && !bank_ready) {
-            pthread_mutex_unlock(&bank_mutex);
-            printf("[Debug] Bank thread received exit signal after wait, breaking loop\n");
-            break;
         }
         
         // Process update cycle
         printf("[Debug] Starting balance update cycle\n");
         
-        // Get current time for logging
-        time_t now = time(NULL);
-        char time_str[26];
-        ctime_r(&now, time_str);
-        time_str[strlen(time_str) - 1] = '\0';  // Remove newline
-        
         pthread_mutex_lock(&account_mutex);
-        printf("[Debug] Starting balance update cycle\n");
         
         // Open ledger file in append mode
         FILE *ledger = fopen("Output/ledger.txt", "a");
@@ -595,14 +579,18 @@ void* update_balance(void* arg) {
             continue;
         }
         
+        // Get current time for logging
+        time_t now = time(NULL);
+        char time_str[26];
+        ctime_r(&now, time_str);
+        time_str[strlen(time_str) - 1] = '\0';
+        
         // Process each account
         for (int i = 0; i < NUM_ACCS; i++) {
-            // Calculate and apply interest
             double reward = account_arr[i].reward_rate * account_arr[i].transaction_tracter;
             account_arr[i].balance += reward;
             account_arr[i].transaction_tracter = 0;
             
-            // Log with line number
             int line_num = atomic_fetch_add(&ledger_line_count, 1) + 1;
             fprintf(ledger, "%d Applied Interest to account %s. New Balance: $%.2f. Time of Update: %s\n",
                     line_num,
@@ -610,19 +598,19 @@ void* update_balance(void* arg) {
                     account_arr[i].balance,
                     time_str);
             
-            // Write to individual account file
             char filename[32];
             snprintf(filename, sizeof(filename), "Output/act_%d.txt", i);
             FILE* f_out = fopen(filename, "a");
-            fprintf(f_out, "%.2f\n", account_arr[i].balance);
-            fclose(f_out);
+            if (f_out) {
+                fprintf(f_out, "%.2f\n", account_arr[i].balance);
+                fclose(f_out);
+            }
         }
         
         fclose(ledger);
         pthread_mutex_unlock(&account_mutex);
         
         // Notify Puddles Bank of update
-        shared_bank_data *shared_data = (shared_bank_data *)shared_memory;
         pthread_mutex_lock(&shared_data->update_mutex);
         atomic_fetch_add(&shared_data->update_counter, 1);
         pthread_mutex_unlock(&shared_data->update_mutex);
@@ -632,6 +620,11 @@ void* update_balance(void* arg) {
         bank_ready = 0;
         pthread_cond_broadcast(&bank_cond);
         pthread_mutex_unlock(&bank_mutex);
+        
+        if (atomic_load(&shared_data->should_exit)) {
+            printf("[Debug] Bank thread received exit signal after update, breaking loop\n");
+            break;
+        }
     }
     
     printf("[Debug] Bank thread exiting\n");
