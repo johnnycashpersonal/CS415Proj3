@@ -4,23 +4,14 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <sys/time.h>
-#include <sys/wait.h>
 #include <sys/stat.h>
 #include <errno.h>
 #include <stdatomic.h>
 #include "account.h"
 #include "string_parser.h"
-#include <sys/mman.h>
-#include <fcntl.h>
-#include <sys/stat.h>
 
 #define INITIAL_SIZE 16
 #define NUM_WORKERS 10
-#define SHM_NAME "/duck_bank_accounts"
-#define SHM_SIZE (sizeof(account) * MAX_ACCOUNTS)
-#define MAX_ACCOUNTS 10  
-void *shared_memory = NULL;
-int shm_fd = -1;
 
 int NUM_ACCS = 0;
 account *account_arr;
@@ -33,14 +24,6 @@ typedef struct {
     int start_index;
     int end_index;
 } thread_data;
-
-typedef struct {
-    account accounts[MAX_ACCOUNTS];
-    int num_accounts;
-    atomic_int update_counter;
-    pthread_mutex_t update_mutex;
-    atomic_int should_exit;
-} shared_bank_data;
 
 // pipe for auditor
 int pipe_fd[2];
@@ -59,6 +42,9 @@ int update_ready = 0;
 atomic_int total_processed = 0;
 atomic_int barrier_wait_count = 0;
 atomic_int update_cycles = 0;
+
+volatile int should_exit = 0;
+
 atomic_int total_updates = 0;
 
 atomic_int valid_transaction_count = 0;  // Only counts valid non-check transactions
@@ -71,9 +57,6 @@ atomic_int ledger_line_count = 0;
 
 atomic_int check_counter = 0;
 
-atomic_int last_update_count = 0;
-
-int puddles_bank_process(void);
 void* process_transaction(void* arg);
 void* update_balance(void* arg);
 void auditor_process(int read_fd);
@@ -153,107 +136,65 @@ int main(int argc, char* argv[]) {
         exit(1);
     }
 
-    // Create output directories
     if (mkdir("Output", 0777) == -1 && errno != EEXIST) {
         perror("Failed to create Output directory");
-        exit(1);
-    }
-    if (mkdir("savings", 0777) == -1 && errno != EEXIST) {
-        perror("Failed to create savings directory");
         exit(1);
     }
 
     atexit(cleanup);
 
-    // Create shared memory
-    shm_fd = shm_open(SHM_NAME, O_CREAT | O_RDWR, 0666);
-    if (shm_fd == -1) {
-        perror("shm_open failed");
-        exit(1);
-    }
-
-    // Set size of shared memory
-    if (ftruncate(shm_fd, SHM_SIZE) == -1) {
-        perror("ftruncate failed");
-        exit(1);
-    }
-
-    // Map shared memory
-    shared_memory = mmap(NULL, SHM_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
-    if (shared_memory == MAP_FAILED) {
-        perror("mmap failed");
-        exit(1);
-    }
-
-    // Initialize shared mutex and exit flag
-    shared_bank_data *shared_data = (shared_bank_data *)shared_memory;
-    pthread_mutexattr_t attr;
-    pthread_mutexattr_init(&attr);
-    pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
-    pthread_mutex_init(&shared_data->update_mutex, &attr);
-    pthread_mutexattr_destroy(&attr);
-    atomic_store(&shared_data->should_exit, 0);  // Initialize shared exit flag
-
-    // Fork into Duck Bank and Puddles Bank processes
-    pid_t bank_pid = fork();
-    if (bank_pid == -1) {
-        perror("bank fork failed");
-        exit(1);
-    }
-
-    if (bank_pid == 0) {
-        // Child process (Puddles Bank)
-        return puddles_bank_process();
-    }
-
-    // Parent process (Duck Bank) continues here
+    /* process input file and do bank stuff */
+    // fork auditor process
+    // Before forking the auditor process
     if (pipe(pipe_fd) == -1) {
         perror("pipe creation failed");
         exit(1);
     }
-
     pid_t auditor_pid = fork();
     if (auditor_pid == -1) {
-        perror("auditor fork failed");
+        perror("forking error");
         exit(1);
     }
 
     if (auditor_pid == 0) {
-        // Auditor process
+        // child process: auditor
         close(pipe_fd[1]);
         auditor_process(pipe_fd[0]);
         exit(0);
     }
 
-    // Main Duck Bank process continues here
+    // parent process: Duck Bank
     close(pipe_fd[0]);
 
     int num_lines = 0;
+
     command_line *cmd_arr = read_file_to_command_lines(argv[1], &num_lines);
     NUM_ACCS = atoi(cmd_arr[0].command_list[0]);
     account_arr = malloc(sizeof(account) * NUM_ACCS);
 
-    pthread_mutex_init(&account_mutex, NULL);
+    pthread_mutex_init(&account_mutex, NULL); // initialize mutex
 
     command_line *transactions = NULL;
     int num_transactions = 0;
     int transactions_per_worker = 0;
 
     gettimeofday(&start_time, NULL);
+
     print_elapsed_time("Processing transactions (multi-threaded)");
 
-    // Initialize accounts
     for (int i = 1; i < num_lines; i++) {
+        // account block
         if (strcmp(cmd_arr[i].command_list[0], "index") == 0) {
             int acc_i = atoi(cmd_arr[i].command_list[1]);
-            strncpy(account_arr[acc_i].account_number, cmd_arr[++i].command_list[0], 16);
+            strncpy(account_arr[acc_i].account_number, cmd_arr[++i].command_list[0], 16); // account number
             account_arr[acc_i].account_number[16] = '\0';
-            strncpy(account_arr[acc_i].password, cmd_arr[++i].command_list[0], 8);
+            strncpy(account_arr[acc_i].password, cmd_arr[++i].command_list[0], 8); // password
             account_arr[acc_i].password[8] = '\0';
-            account_arr[acc_i].balance = strtod(cmd_arr[++i].command_list[0], NULL);
-            account_arr[acc_i].reward_rate = strtod(cmd_arr[++i].command_list[0], NULL);
-            account_arr[acc_i].transaction_tracter = 0;
+            account_arr[acc_i].balance = strtod(cmd_arr[++i].command_list[0], NULL); // balance
+            account_arr[acc_i].reward_rate = strtod(cmd_arr[++i].command_list[0], NULL); // reward rate
+            account_arr[acc_i].transaction_tracter = 0; // transaction tracter init
         } else {
+            // use rest of cmd_arr for transaction arr
             transactions = &cmd_arr[i];
             num_transactions = num_lines - i;
             transactions_per_worker = num_transactions / NUM_WORKERS;
@@ -261,17 +202,12 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    memcpy(shared_data->accounts, account_arr, sizeof(account) * NUM_ACCS);
-    shared_data->num_accounts = NUM_ACCS;
-    atomic_store(&shared_data->update_counter, 0);
-
-    // Initialize synchronization primitives
     printf("[Debug] Initializing synchronization primitives\n");
     pthread_barrier_init(&start_barrier, NULL, NUM_WORKERS + 2);
     pthread_cond_init(&update_cond, NULL);
     pthread_mutex_init(&update_mutex, NULL);
 
-    // Create bank thread
+    // Create bank thread first
     pthread_t bank_thread;
     printf("[Debug] Creating bank thread\n");
     pthread_create(&bank_thread, NULL, update_balance, NULL);
@@ -284,12 +220,13 @@ int main(int argc, char* argv[]) {
         worker_data[i].transactions = transactions;
         worker_data[i].start_index = i * transactions_per_worker;
         worker_data[i].end_index = (i == NUM_WORKERS - 1) ? num_transactions : (i + 1) * transactions_per_worker;
+
         printf("[Debug] Creating worker thread %d to process transactions %d-%d\n", 
                 i, worker_data[i].start_index, worker_data[i].end_index);
         pthread_create(&worker_threads[i], NULL, process_transaction, &worker_data[i]);
     }
 
-    // Wait for all threads to be ready
+    // Wait at barrier for all threads to be ready
     printf("[Debug] Main thread waiting at barrier\n");
     pthread_barrier_wait(&start_barrier);
     printf("[Debug] All threads have started\n");
@@ -302,26 +239,19 @@ int main(int argc, char* argv[]) {
         print_elapsed_time(msg);
     }
 
-        // Signal bank thread to exit and wait for it
+    // Signal bank thread to exit and wait for it
     printf("[Debug] Signaling bank thread to exit\n");
-    pthread_mutex_lock(&update_mutex);  // Use update_mutex instead of bank_mutex
-    shared_data->should_exit = 1;  
-    pthread_cond_signal(&update_cond);  // Use update_cond instead of bank_cond
+    pthread_mutex_lock(&update_mutex);
+    should_exit = 1;  
+    pthread_cond_signal(&update_cond);
     pthread_mutex_unlock(&update_mutex);
     pthread_join(bank_thread, NULL);
-    printf("[Debug] Bank thread joined successfully\n");
-
-    // Wait for child processes
-    int status;
-    waitpid(bank_pid, &status, 0);
-    waitpid(auditor_pid, &status, 0);
 
     // Cleanup
     pthread_barrier_destroy(&start_barrier);
     pthread_cond_destroy(&update_cond);
     pthread_mutex_destroy(&update_mutex);
 
-    // Print statistics
     struct timeval end_time;
     gettimeofday(&end_time, NULL);
     long total_time = (end_time.tv_sec - start_time.tv_sec) * 1000 + 
@@ -338,14 +268,6 @@ int main(int argc, char* argv[]) {
     printf("Total Balance Updates: %d\n", atomic_load(&total_updates));
     printf("----------------------------------------\n");
     printf("Program completed successfully.\n\n");
-
-    // Cleanup shared memory
-    if (munmap(shared_memory, SHM_SIZE) == -1) {
-        perror("munmap failed");
-    }
-    if (shm_unlink(SHM_NAME) == -1) {
-        perror("shm_unlink failed");
-    }
 
     return 0;
 }
@@ -411,10 +333,6 @@ void* process_transaction(void* arg) {
                                account_arr[src_acc_ind].account_number,
                                account_arr[dst_acc_ind].account_number,
                                trans_amount);
-                        
-                        // Add Puddles Bank transaction tracker update
-                        shared_bank_data *shared_data = (shared_bank_data *)shared_memory;
-                        shared_data->accounts[src_acc_ind].transaction_tracter += trans_amount;
                     } else {
                         printf("[Debug] Insufficient funds for transfer: %s\n", account_arr[src_acc_ind].account_number);
                         atomic_fetch_add(&stats.invalid_transactions, 1);
@@ -471,10 +389,6 @@ void* process_transaction(void* arg) {
                 atomic_fetch_add(&stats.deposits, 1);
                 atomic_fetch_add(&stats.total_transactions, 1);
                 valid_transaction = 1;
-                
-                // Add Puddles Bank transaction tracker update
-                shared_bank_data *shared_data = (shared_bank_data *)shared_memory;
-                shared_data->accounts[src_acc_ind].transaction_tracter += trans_amount;
                 break;
 
             case 'W':
@@ -490,10 +404,6 @@ void* process_transaction(void* arg) {
                     atomic_fetch_add(&stats.withdrawals, 1);
                     atomic_fetch_add(&stats.total_transactions, 1);
                     valid_transaction = 1;
-                    
-                    // Add Puddles Bank transaction tracker update
-                    shared_bank_data *shared_data = (shared_bank_data *)shared_memory;
-                    shared_data->accounts[src_acc_ind].transaction_tracter += trans_amount;
                 } else {
                     printf("[Debug] Insufficient funds for withdrawal: Account %s, Amount: %.2f, Balance: %.2f\n",
                            account_arr[src_acc_ind].account_number,
@@ -531,35 +441,31 @@ void* process_transaction(void* arg) {
     if (remaining == 0) {
         pthread_mutex_lock(&bank_mutex);
         bank_ready = 1;
-        shared_bank_data *shared_data = (shared_bank_data *)shared_memory;
-        atomic_store(&shared_data->should_exit, 1);
-        pthread_cond_broadcast(&bank_cond);  // Change signal to broadcast
+        should_exit = 1;
+        pthread_cond_signal(&bank_cond);
         pthread_mutex_unlock(&bank_mutex);
     }
 
     return NULL;
 }
 
-// In update_balance(), modify the main loop:
 void* update_balance(void* arg) {
     pthread_barrier_wait(&start_barrier);
-    shared_bank_data *shared_data = (shared_bank_data *)shared_memory;
     
-    while (!atomic_load(&shared_data->should_exit)) {
+    while (!should_exit) {
         pthread_mutex_lock(&bank_mutex);
-        while (!bank_ready && !atomic_load(&shared_data->should_exit)) {
+        while (!bank_ready && !should_exit) {
             pthread_cond_wait(&bank_cond, &bank_mutex);
         }
         
-        if (atomic_load(&shared_data->should_exit) && !bank_ready) {
-            pthread_mutex_unlock(&bank_mutex);
-            break;
-        }
-        
-        // Process update cycle
-        printf("[Debug] Starting balance update cycle\n");
+        // Get current time for logging
+        time_t now = time(NULL);
+        char time_str[26];
+        ctime_r(&now, time_str);
+        time_str[strlen(time_str) - 1] = '\0';  // Remove newline
         
         pthread_mutex_lock(&account_mutex);
+        printf("[Debug] Starting balance update cycle\n");
         
         // Open ledger file in append mode
         FILE *ledger = fopen("Output/ledger.txt", "a");
@@ -570,18 +476,14 @@ void* update_balance(void* arg) {
             continue;
         }
         
-        // Get current time for logging
-        time_t now = time(NULL);
-        char time_str[26];
-        ctime_r(&now, time_str);
-        time_str[strlen(time_str) - 1] = '\0';
-        
         // Process each account
         for (int i = 0; i < NUM_ACCS; i++) {
+            // Calculate and apply interest
             double reward = account_arr[i].reward_rate * account_arr[i].transaction_tracter;
             account_arr[i].balance += reward;
             account_arr[i].transaction_tracter = 0;
             
+            // Log with line number
             int line_num = atomic_fetch_add(&ledger_line_count, 1) + 1;
             fprintf(ledger, "%d Applied Interest to account %s. New Balance: $%.2f. Time of Update: %s\n",
                     line_num,
@@ -589,119 +491,27 @@ void* update_balance(void* arg) {
                     account_arr[i].balance,
                     time_str);
             
+            // Write to individual account file
             char filename[32];
             snprintf(filename, sizeof(filename), "Output/act_%d.txt", i);
             FILE* f_out = fopen(filename, "a");
-            if (f_out) {
-                fprintf(f_out, "%.2f\n", account_arr[i].balance);
-                fclose(f_out);
-            }
+            fprintf(f_out, "%.2f\n", account_arr[i].balance);
+            fclose(f_out);
         }
         
         fclose(ledger);
         pthread_mutex_unlock(&account_mutex);
-        
-        // Notify Puddles Bank of update
-        pthread_mutex_lock(&shared_data->update_mutex);
-        atomic_fetch_add(&shared_data->update_counter, 1);
-        pthread_mutex_unlock(&shared_data->update_mutex);
         
         atomic_fetch_add(&total_updates, 1);
         
         bank_ready = 0;
         pthread_cond_broadcast(&bank_cond);
         pthread_mutex_unlock(&bank_mutex);
+        
+        if (should_exit) break;
     }
     
-    printf("[Debug] Bank thread exiting\n");
     return NULL;
-}
-
-int puddles_bank_process() {
-    printf("[Puddles] Starting Puddles Bank process\n");
-    shared_bank_data *shared_data = (shared_bank_data *)shared_memory;
-    int local_update_count = 0;
-    double *savings_balances = malloc(sizeof(double) * shared_data->num_accounts);
-    
-    // Wait for shared data to be fully initialized
-    printf("[Puddles] Waiting for shared data initialization...\n");
-    while (shared_data->num_accounts == 0) {
-        sched_yield();
-    }
-    printf("[Puddles] Shared data initialized with %d accounts\n", shared_data->num_accounts);
-    
-    // Initialize balances and files
-    for (int i = 0; i < shared_data->num_accounts; i++) {
-        savings_balances[i] = shared_data->accounts[i].balance * 0.2;
-        printf("[Puddles] Initial balance for account %d: %.2f (20%% of %.2f)\n", 
-               i, savings_balances[i], shared_data->accounts[i].balance);
-        
-        char filename[64];
-        snprintf(filename, sizeof(filename), "savings/act_%d.txt", i);
-        printf("[Puddles] Creating initial file: %s\n", filename);
-        
-        FILE* f_out = fopen(filename, "w");
-        if (f_out) {
-            fprintf(f_out, "account: %d\n", i);
-            fprintf(f_out, "Current Savings Balance  %.2f\n", savings_balances[i]);
-            fclose(f_out);
-            printf("[Puddles] Wrote initial balance for account %d\n", i);
-        } else {
-            printf("[Puddles] ERROR: Could not open file %s: %s\n", filename, strerror(errno));
-        }
-    }
-    
-    printf("[Puddles] Entering main update loop\n");
-    while (1) {
-        pthread_mutex_lock(&shared_data->update_mutex);
-        int current_count = atomic_load(&shared_data->update_counter);
-        int should_stop = atomic_load(&shared_data->should_exit);  // Read from shared memory
-        pthread_mutex_unlock(&shared_data->update_mutex);
-        
-        printf("[Puddles] Current update count: %d, Local count: %d\n", 
-               current_count, local_update_count);
-        
-        if (current_count > local_update_count) {
-            printf("[Puddles] Processing update cycle %d\n", current_count);
-            
-            for (int i = 0; i < shared_data->num_accounts; i++) {
-                char filename[64];
-                snprintf(filename, sizeof(filename), "savings/act_%d.txt", i);
-                
-                // Store old balance for debugging
-                double old_balance = savings_balances[i];
-                savings_balances[i] *= 1.02;
-                
-                printf("[Puddles] Account %d: %.2f -> %.2f (2%% interest)\n", 
-                       i, old_balance, savings_balances[i]);
-                
-                FILE* f_out = fopen(filename, "a");
-                if (f_out) {
-                    fprintf(f_out, "Current Savings Balance  %.2f\n", savings_balances[i]);
-                    fclose(f_out);
-                    printf("[Puddles] Updated balance written to %s\n", filename);
-                } else {
-                    printf("[Puddles] ERROR: Could not open file %s: %s\n", 
-                           filename, strerror(errno));
-                }
-            }
-            
-            local_update_count = current_count;
-            printf("[Puddles] Update cycle %d completed\n", current_count);
-        }
-        
-        if (should_stop && current_count == local_update_count) {
-            printf("[Puddles] Received exit signal (count=%d), breaking main loop\n", 
-                   current_count);
-            break;
-        }
-        
-        sched_yield();
-    }
-    
-    printf("[Puddles] Cleaning up and exiting\n");
-    free(savings_balances);
-    return 0;
 }
 
 void auditor_process(int read_fd) {

@@ -3,10 +3,6 @@
 #include <string.h>
 #include <pthread.h>
 #include <unistd.h>
-#include <sys/time.h>
-#include <sys/stat.h>
-#include <errno.h>
-#include <stdatomic.h>
 #include "account.h"
 #include "string_parser.h"
 
@@ -15,9 +11,8 @@
 
 int NUM_ACCS = 0;
 account *account_arr;
-command_line *cmd_arr;
+// thread time
 pthread_mutex_t account_mutex;
-int resources_freed = 0;  // Track if resources have been freed
 
 typedef struct {
     command_line *transactions;
@@ -30,29 +25,9 @@ int pipe_fd[2];
 
 stats_t stats = {0}; // Initialize all stats to 0
 
-struct timeval start_time;
-
 void* process_transaction(void* arg);
 void* update_balance(void* arg);
 void auditor_process(int read_fd);
-
-// Add cleanup function
-void cleanup() {
-    if (!resources_freed) {
-        if (account_arr) free(account_arr);
-        if (cmd_arr) free(cmd_arr);
-        pthread_mutex_destroy(&account_mutex);
-        resources_freed = 1;
-    }
-}
-
-void print_elapsed_time(const char* message) {
-    struct timeval now;
-    gettimeofday(&now, NULL);
-    long elapsed = (now.tv_sec - start_time.tv_sec) * 1000 + 
-                  (now.tv_usec - start_time.tv_usec) / 1000;
-    printf("[%ldms] %s\n", elapsed, message);
-}
 
 command_line* read_file_to_command_lines(const char* filename, int* num_lines) {
     FILE* file = fopen(filename, "r");
@@ -106,18 +81,6 @@ command_line* read_file_to_command_lines(const char* filename, int* num_lines) {
 }
 
 int main(int argc, char* argv[]) {
-    if (argc != 2) {
-        fprintf(stderr, "Usage: %s <input_file>\n", argv[0]);
-        exit(1);
-    }
-
-    if (mkdir("Output", 0777) == -1 && errno != EEXIST) {
-        perror("Failed to create Output directory");
-        exit(1);
-    }
-
-    atexit(cleanup);
-
     /* process input file and do bank stuff */
     // fork auditor process
     // Before forking the auditor process
@@ -152,9 +115,7 @@ int main(int argc, char* argv[]) {
     command_line *transactions = NULL;
     int num_transactions = 0;
 
-    gettimeofday(&start_time, NULL);
-
-    print_elapsed_time("Processing transactions (multi-threaded)");
+    printf("Processing transactions (multi-threaded)\n");
 
     for (int i = 1; i < num_lines; i++) {
         // account block
@@ -186,24 +147,20 @@ int main(int argc, char* argv[]) {
         worker_data[i].start_index = i * transactions_per_worker;
         worker_data[i].end_index = (i == NUM_WORKERS - 1) ? num_transactions : (i + 1) * transactions_per_worker;
 
-        char msg[100];
-        snprintf(msg, sizeof(msg), "Creating worker thread %d to process transactions %d-%d", 
-                i, worker_data[i].start_index, worker_data[i].end_index);
-        print_elapsed_time(msg);
+        // start thread execution
+        printf("Creating worker thread %d to process transactions %d-%d\n", i, worker_data[i].start_index, worker_data[i].end_index);
         pthread_create(&worker_threads[i], NULL, process_transaction, &worker_data[i]);
     }
 
-    print_elapsed_time("Waiting for all threads to complete");
+    printf("Waiting for all threads to complete\n");
 
     // wait for all worker threads to finish
     for (int i = 0; i < NUM_WORKERS; i++) {
         pthread_join(worker_threads[i], NULL);
-        char msg[100];
-        snprintf(msg, sizeof(msg), "Worker thread %d is finished", i);
-        print_elapsed_time(msg);
+        printf("Worker thread %d is finished\n", i);
     }
 
-    print_elapsed_time("All workers finished. Creating bank thread to update balances");
+    printf("All workers finshed. Creating bank thread to update balances\n");
 
     // create bank thread
     pthread_t bank_thread;
@@ -212,15 +169,8 @@ int main(int argc, char* argv[]) {
     // wait for bank thread to finish
     pthread_join(bank_thread, NULL);
 
-    print_elapsed_time("All balances updated.");
-
-    // Get final elapsed time for statistics
-    struct timeval end_time;
-    gettimeofday(&end_time, NULL);
-    long total_time = (end_time.tv_sec - start_time.tv_sec) * 1000 + 
-                     (end_time.tv_usec - start_time.tv_usec) / 1000;
-
-    printf("\nProgram Statistics (Total time: %ld ms):\n", total_time);
+    // Print final statistics
+    printf("\nProgram Statistics:\n");
     printf("----------------------------------------\n");
     printf("Total Transactions Processed: %d\n", stats.total_transactions);
     printf("Invalid Transactions Caught: %d\n", stats.invalid_transactions);
@@ -229,10 +179,8 @@ int main(int argc, char* argv[]) {
     printf("Successful Withdrawals: %d\n", stats.withdrawals);
     printf("Balance Checks Performed: %d\n", stats.checks);
     printf("----------------------------------------\n");
-    printf("Total Balance Updates: 1\n");
-    printf("Program completed successfully.\n\n");
+    printf("Process complete, all balances updated & Program Ending Successfully.\n\n");
 
-    resources_freed = 1;  // Mark resources as freed
     free(account_arr);
     free(cmd_arr);
     pthread_mutex_destroy(&account_mutex);
@@ -259,21 +207,6 @@ void* process_transaction(void* arg) {
             if (strcmp(account_arr[j].account_number, transaction->command_list[1]) == 0) {
                 src_acc_ind = j;
                 break;
-            }
-        }
-        if (src_acc_ind == -1) {
-            stats.invalid_transactions++;
-            pthread_mutex_unlock(&account_mutex);
-            continue;
-        }
-
-        // Add transaction validation before processing
-        if (transaction->command_list[0][0] == 'W' || transaction->command_list[0][0] == 'T') {
-            trans_amount = strtod(transaction->command_list[3], NULL);
-            if (account_arr[src_acc_ind].balance < trans_amount) {
-                stats.invalid_transactions++;
-                pthread_mutex_unlock(&account_mutex);
-                continue;
             }
         }
 
