@@ -286,9 +286,15 @@ int main(int argc, char* argv[]) {
     pthread_mutex_lock(&bank_mutex);
     should_exit = 1;
     bank_ready = 1;
-    pthread_cond_signal(&bank_cond);
+    pthread_cond_broadcast(&bank_cond);
     pthread_mutex_unlock(&bank_mutex);
+
+    // Add a small delay to ensure the signal is processed
+    usleep(1000);
+    
+    printf("[Debug] Waiting for bank thread to join\n");
     pthread_join(bank_thread, NULL);
+    printf("[Debug] Bank thread joined successfully\n");
 
     // Wait for Puddles Bank to finish
     waitpid(puddles_pid, NULL, 0);
@@ -506,6 +512,7 @@ void* update_balance(void* arg) {
         
         if (should_exit) {
             pthread_mutex_unlock(&bank_mutex);
+            printf("[Debug] Bank thread exiting\n");
             break;
         }
         
