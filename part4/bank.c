@@ -609,11 +609,15 @@ int puddles_bank_process() {
     int local_update_count = 0;
     double *savings_balances = malloc(sizeof(double) * shared_data->num_accounts);
     
+    // Wait for shared data to be fully initialized
+    while (shared_data->num_accounts == 0) {
+        sched_yield();  // Using required function instead of usleep
+    }
+    
     // Initialize balances and files
     for (int i = 0; i < shared_data->num_accounts; i++) {
         savings_balances[i] = shared_data->accounts[i].balance * 0.2;
         
-        // Create initial file with account header
         char filename[64];
         snprintf(filename, sizeof(filename), "savings/act_%d.txt", i);
         FILE* f_out = fopen(filename, "w");
@@ -631,16 +635,14 @@ int puddles_bank_process() {
         pthread_mutex_unlock(&shared_data->update_mutex);
         
         if (current_count > local_update_count) {
-            // Process all accounts when an update is triggered
             for (int i = 0; i < shared_data->num_accounts; i++) {
-                // Apply 2% interest rate
-                savings_balances[i] *= 1.02;
-                
-                // Append new balance to file
                 char filename[64];
                 snprintf(filename, sizeof(filename), "savings/act_%d.txt", i);
                 FILE* f_out = fopen(filename, "a");
+                
                 if (f_out) {
+                    // Apply flat 2% interest rate as specified
+                    savings_balances[i] *= 1.02;
                     fprintf(f_out, "Current Savings Balance  %.2f\n", savings_balances[i]);
                     fclose(f_out);
                 }
@@ -652,7 +654,7 @@ int puddles_bank_process() {
             break;
         }
         
-        usleep(1000); // Reduced sleep time for better responsiveness
+        sched_yield();  // Using required function instead of usleep
     }
     
     free(savings_balances);
