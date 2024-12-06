@@ -546,10 +546,9 @@ void* update_balance(void* arg) {
         time_t now = time(NULL);
         char time_str[26];
         ctime_r(&now, time_str);
-        time_str[strlen(time_str) - 1] = '\0';  // Remove newline
+        time_str[strlen(time_str) - 1] = '\0';
         
         pthread_mutex_lock(&account_mutex);
-        printf("[Debug] Starting balance update cycle\n");
         
         // Open ledger file in append mode
         FILE *ledger = fopen("Output/ledger.txt", "a");
@@ -560,12 +559,19 @@ void* update_balance(void* arg) {
             continue;
         }
         
+        // Update shared memory before processing accounts
+        shared_bank_data *shared_data = (shared_bank_data *)shared_memory;
+        pthread_mutex_lock(&shared_data->update_mutex);
+        
         // Process each account
         for (int i = 0; i < NUM_ACCS; i++) {
             // Calculate and apply interest
             double reward = account_arr[i].reward_rate * account_arr[i].transaction_tracter;
             account_arr[i].balance += reward;
             account_arr[i].transaction_tracter = 0;
+            
+            // Update shared memory with new balance
+            shared_data->accounts[i].balance = account_arr[i].balance;
             
             // Log with line number
             int line_num = atomic_fetch_add(&ledger_line_count, 1) + 1;
@@ -583,17 +589,14 @@ void* update_balance(void* arg) {
             fclose(f_out);
         }
         
-        fclose(ledger);
-        pthread_mutex_unlock(&account_mutex);
-        
-        // Notify Puddles Bank of update
-        shared_bank_data *shared_data = (shared_bank_data *)shared_memory;
-        pthread_mutex_lock(&shared_data->update_mutex);
+        // Signal update to Puddles Bank
         atomic_fetch_add(&shared_data->update_counter, 1);
         pthread_mutex_unlock(&shared_data->update_mutex);
         
-        atomic_fetch_add(&total_updates, 1);
+        fclose(ledger);
+        pthread_mutex_unlock(&account_mutex);
         
+        atomic_fetch_add(&total_updates, 1);
         bank_ready = 0;
         pthread_cond_broadcast(&bank_cond);
         pthread_mutex_unlock(&bank_mutex);
@@ -606,7 +609,6 @@ void* update_balance(void* arg) {
 
 int puddles_bank_process() {
     shared_bank_data *shared_data = (shared_bank_data *)shared_memory;
-    atomic_int local_update_count = 0;  // Track updates locally
     
     // Initialize balances and reward rates
     for (int i = 0; i < shared_data->num_accounts; i++) {
@@ -626,8 +628,8 @@ int puddles_bank_process() {
         pthread_mutex_lock(&shared_data->update_mutex);
         int current_count = atomic_load(&shared_data->update_counter);
         
-        // Only process if we haven't seen this update yet
-        if (current_count > local_update_count) {
+        // If Duck Bank has updated, update Puddles accounts
+        if (current_count > last_update_count) {
             for (int i = 0; i < shared_data->num_accounts; i++) {
                 // Apply 2% interest to the entire balance
                 shared_data->accounts[i].balance *= 1.02;
@@ -640,7 +642,7 @@ int puddles_bank_process() {
                         shared_data->accounts[i].balance);
                 fclose(f_out);
             }
-            local_update_count = current_count;  // Update our local counter
+            last_update_count = current_count;
         }
         pthread_mutex_unlock(&shared_data->update_mutex);
         usleep(1000);  // Small sleep to prevent busy waiting
