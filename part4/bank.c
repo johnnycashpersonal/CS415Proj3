@@ -613,33 +613,37 @@ int puddles_bank_process() {
     for (int i = 0; i < shared_data->num_accounts; i++) {
         savings_balances[i] = shared_data->accounts[i].balance * 0.2;
         
+        // Create initial file with account header
         char filename[64];
         snprintf(filename, sizeof(filename), "savings/act_%d.txt", i);
         FILE* f_out = fopen(filename, "w");
-        fprintf(f_out, "account: %d\n", i);
-        fclose(f_out);
-    }
-    
-    // Wait for Duck Bank to be ready
-    while (atomic_load(&shared_data->update_counter) == 0) {
-        usleep(1000);
+        if (f_out) {
+            fprintf(f_out, "account: %d\n", i);
+            fprintf(f_out, "Current Savings Balance  %.2f\n", savings_balances[i]);
+            fclose(f_out);
+        }
     }
     
     while (1) {
         pthread_mutex_lock(&shared_data->update_mutex);
         int current_count = atomic_load(&shared_data->update_counter);
-        int should_stop = should_exit;  // Direct read of volatile variable
+        int should_stop = should_exit;
         pthread_mutex_unlock(&shared_data->update_mutex);
         
         if (current_count > local_update_count) {
+            // Process all accounts when an update is triggered
             for (int i = 0; i < shared_data->num_accounts; i++) {
+                // Apply 2% interest rate
                 savings_balances[i] *= 1.02;
                 
+                // Append new balance to file
                 char filename[64];
                 snprintf(filename, sizeof(filename), "savings/act_%d.txt", i);
                 FILE* f_out = fopen(filename, "a");
-                fprintf(f_out, "Current Savings Balance  %.2f\n", savings_balances[i]);
-                fclose(f_out);
+                if (f_out) {
+                    fprintf(f_out, "Current Savings Balance  %.2f\n", savings_balances[i]);
+                    fclose(f_out);
+                }
             }
             local_update_count = current_count;
         }
@@ -648,7 +652,7 @@ int puddles_bank_process() {
             break;
         }
         
-        usleep(5000);
+        usleep(1000); // Reduced sleep time for better responsiveness
     }
     
     free(savings_balances);
