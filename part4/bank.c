@@ -4,6 +4,7 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <sys/time.h>
+#include <sys/wait.h>
 #include <sys/stat.h>
 #include <errno.h>
 #include <stdatomic.h>
