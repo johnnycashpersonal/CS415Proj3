@@ -607,8 +607,7 @@ void* update_balance(void* arg) {
 int puddles_bank_process() {
     shared_bank_data *shared_data = (shared_bank_data *)shared_memory;
     
-    // No need to initialize - data is already in shared memory
-    // Just modify the balances and reward rates
+    // Initialize balances and reward rates
     for (int i = 0; i < shared_data->num_accounts; i++) {
         shared_data->accounts[i].balance *= 0.2;  // 20% of Duck Bank balance
         shared_data->accounts[i].reward_rate = 0.02;  // 2% flat rate
@@ -622,11 +621,8 @@ int puddles_bank_process() {
         // If Duck Bank has updated, update Puddles accounts
         if (current_count > last_update_count) {
             for (int i = 0; i < shared_data->num_accounts; i++) {
-                // Apply 2% interest to transaction tracker
-                double reward = 0.02 * shared_data->accounts[i].transaction_tracter;
-                shared_data->accounts[i].balance *= 1.02;  // Apply 2% to entire balance
-                shared_data->accounts[i].balance += reward;  // Add transaction reward
-                shared_data->accounts[i].transaction_tracter = 0;
+                // Apply 2% interest to the entire balance
+                shared_data->accounts[i].balance *= 1.02;
                 
                 // Write to savings output file
                 char filename[64];
