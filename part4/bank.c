@@ -552,16 +552,30 @@ void* update_balance(void* arg) {
     pthread_barrier_wait(&start_barrier);
     shared_bank_data *shared_data = (shared_bank_data *)shared_memory;
     
-    while (1) {  // Changed from while (!atomic_load(&shared_data->should_exit))
+    while (1) {
         pthread_mutex_lock(&bank_mutex);
-        while (!bank_ready) {  // Removed the second condition
+        
+        // Check exit condition first
+        if (atomic_load(&shared_data->should_exit) && !bank_ready) {
+            pthread_mutex_unlock(&bank_mutex);
+            printf("[Debug] Bank thread received exit signal, breaking loop\n");
+            break;
+        }
+        
+        // Wait for work or exit signal
+        while (!bank_ready && !atomic_load(&shared_data->should_exit)) {
             pthread_cond_wait(&bank_cond, &bank_mutex);
         }
         
-        if (atomic_load(&shared_data->should_exit)) {
+        // Check exit condition again after wait
+        if (atomic_load(&shared_data->should_exit) && !bank_ready) {
             pthread_mutex_unlock(&bank_mutex);
+            printf("[Debug] Bank thread received exit signal after wait, breaking loop\n");
             break;
         }
+        
+        // Process update cycle
+        printf("[Debug] Starting balance update cycle\n");
         
         // Get current time for logging
         time_t now = time(NULL);
@@ -618,10 +632,9 @@ void* update_balance(void* arg) {
         bank_ready = 0;
         pthread_cond_broadcast(&bank_cond);
         pthread_mutex_unlock(&bank_mutex);
-        
-        if (atomic_load(&shared_data->should_exit)) break;
     }
     
+    printf("[Debug] Bank thread exiting\n");
     return NULL;
 }
 
