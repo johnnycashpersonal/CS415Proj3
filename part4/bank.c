@@ -606,6 +606,7 @@ void* update_balance(void* arg) {
 
 int puddles_bank_process() {
     shared_bank_data *shared_data = (shared_bank_data *)shared_memory;
+    atomic_int local_update_count = 0;  // Track updates locally
     
     // Initialize balances and reward rates
     for (int i = 0; i < shared_data->num_accounts; i++) {
@@ -625,8 +626,8 @@ int puddles_bank_process() {
         pthread_mutex_lock(&shared_data->update_mutex);
         int current_count = atomic_load(&shared_data->update_counter);
         
-        // If Duck Bank has updated, update Puddles accounts
-        if (current_count > last_update_count) {
+        // Only process if we haven't seen this update yet
+        if (current_count > local_update_count) {
             for (int i = 0; i < shared_data->num_accounts; i++) {
                 // Apply 2% interest to the entire balance
                 shared_data->accounts[i].balance *= 1.02;
@@ -639,7 +640,7 @@ int puddles_bank_process() {
                         shared_data->accounts[i].balance);
                 fclose(f_out);
             }
-            last_update_count = current_count;
+            local_update_count = current_count;  // Update our local counter
         }
         pthread_mutex_unlock(&shared_data->update_mutex);
         usleep(1000);  // Small sleep to prevent busy waiting
