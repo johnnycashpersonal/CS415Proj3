@@ -645,7 +645,7 @@ void puddles_bank_process(int num_accounts) {
 
     // Initialize savings accounts
     for (int i = 0; i < num_accounts; i++) {
-        shared_accounts[i].current_balance = shared_accounts[i].initial_balance * INITIAL_SAVINGS_PERCENTAGE;
+        shared_accounts[i].current_balance = shared_accounts[i].initial_balance;
         shared_accounts[i].needs_update = false;
         
         char filename[64];
