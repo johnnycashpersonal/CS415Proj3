@@ -18,10 +18,11 @@ typedef struct {
     command_line *transactions;
     int start_index;
     int end_index;
+    stats_t* stats;
 } thread_data;
 
-// pipe time
-int pipe_fd[2];
+
+static int pipe_fd[2];
 
 stats_t stats = {0}; // Initialize all stats to 0
 
@@ -81,13 +82,18 @@ command_line* read_file_to_command_lines(const char* filename, int* num_lines) {
 }
 
 int main(int argc, char* argv[]) {
-    /* process input file and do bank stuff */
-    // fork auditor process
-    // Before forking the auditor process
+    if (argc != 2) {
+        fprintf(stderr, "Usage: %s <input_file>\n", argv[0]);
+        exit(1);
+    }
+
+    // Set up pipe for auditor
     if (pipe(pipe_fd) == -1) {
         perror("pipe creation failed");
         exit(1);
     }
+
+    // Fork auditor process
     pid_t auditor_pid = fork();
     if (auditor_pid == -1) {
         perror("forking error");
@@ -95,114 +101,159 @@ int main(int argc, char* argv[]) {
     }
 
     if (auditor_pid == 0) {
-        // child process: auditor
-        close(pipe_fd[1]);
+        // Child process: auditor
+        close(pipe_fd[1]);  // Close write end
         auditor_process(pipe_fd[0]);
         exit(0);
     }
 
-    // parent process: Duck Bank
-    close(pipe_fd[0]);
+    // Parent process: Duck Bank
+    close(pipe_fd[0]);  // Close read end
 
+    // Initialize atomic stats
+    stats_t stats = {0};
+
+    // Read input file
     int num_lines = 0;
-
     command_line *cmd_arr = read_file_to_command_lines(argv[1], &num_lines);
+    if (!cmd_arr) {
+        perror("Failed to read input file");
+        exit(1);
+    }
+
+    // Get number of accounts
     NUM_ACCS = atoi(cmd_arr[0].command_list[0]);
     account_arr = malloc(sizeof(account) * NUM_ACCS);
+    if (!account_arr) {
+        perror("Failed to allocate account array");
+        free(cmd_arr);
+        exit(1);
+    }
 
-    pthread_mutex_init(&account_mutex, NULL); // initialize mutex
+    // Initialize account locks
+    for (int i = 0; i < NUM_ACCS; i++) {
+        pthread_mutex_init(&account_arr[i].ac_lock, NULL);
+    }
 
     command_line *transactions = NULL;
     int num_transactions = 0;
 
     printf("Processing transactions (multi-threaded)\n");
 
+    // Process account information
     for (int i = 1; i < num_lines; i++) {
-        // account block
         if (strcmp(cmd_arr[i].command_list[0], "index") == 0) {
             int acc_i = atoi(cmd_arr[i].command_list[1]);
-            strncpy(account_arr[acc_i].account_number, cmd_arr[++i].command_list[0], 16); // account number
+            
+            // Account number
+            strncpy(account_arr[acc_i].account_number, cmd_arr[++i].command_list[0], 16);
             account_arr[acc_i].account_number[16] = '\0';
-            strncpy(account_arr[acc_i].password, cmd_arr[++i].command_list[0], 8); // password
+            
+            // Password
+            strncpy(account_arr[acc_i].password, cmd_arr[++i].command_list[0], 8);
             account_arr[acc_i].password[8] = '\0';
-            account_arr[acc_i].balance = strtod(cmd_arr[++i].command_list[0], NULL); // balance
-            account_arr[acc_i].reward_rate = strtod(cmd_arr[++i].command_list[0], NULL); // reward rate
-            account_arr[acc_i].transaction_tracter = 0; // transaction tracter init
+            
+            // Balance and rate
+            account_arr[acc_i].balance = strtod(cmd_arr[++i].command_list[0], NULL);
+            account_arr[acc_i].reward_rate = strtod(cmd_arr[++i].command_list[0], NULL);
+            account_arr[acc_i].transaction_tracter = 0;
         } else {
-            // use rest of cmd_arr for transaction arr
             transactions = &cmd_arr[i];
             num_transactions = num_lines - i;
             break;
         }
     }
 
-    // create worker threads
+    // Set up worker threads
     pthread_t worker_threads[NUM_WORKERS];
     thread_data worker_data[NUM_WORKERS];
     int transactions_per_worker = num_transactions / NUM_WORKERS;
 
-    // assign start, end indices and transaction vals to thread data
+    // Create worker threads
     for (int i = 0; i < NUM_WORKERS; i++) {
         worker_data[i].transactions = transactions;
         worker_data[i].start_index = i * transactions_per_worker;
-        worker_data[i].end_index = (i == NUM_WORKERS - 1) ? num_transactions : (i + 1) * transactions_per_worker;
+        worker_data[i].end_index = (i == NUM_WORKERS - 1) ? 
+                                  num_transactions : 
+                                  (i + 1) * transactions_per_worker;
+        worker_data[i].stats = &stats;
 
-        // start thread execution
-        printf("Creating worker thread %d to process transactions %d-%d\n", i, worker_data[i].start_index, worker_data[i].end_index);
-        pthread_create(&worker_threads[i], NULL, process_transaction, &worker_data[i]);
+        printf("Creating worker thread %d to process transactions %d-%d\n", 
+               i, worker_data[i].start_index, worker_data[i].end_index);
+
+        int create_status = pthread_create(&worker_threads[i], NULL, 
+                                         process_transaction, &worker_data[i]);
+        if (create_status != 0) {
+            fprintf(stderr, "Failed to create worker thread %d: %s\n", 
+                    i, strerror(create_status));
+            exit(1);
+        }
     }
 
+    // Wait for worker threads to complete
     printf("Waiting for all threads to complete\n");
-
-    // wait for all worker threads to finish
     for (int i = 0; i < NUM_WORKERS; i++) {
-        pthread_join(worker_threads[i], NULL);
-        printf("Worker thread %d is finished\n", i);
+        int join_status = pthread_join(worker_threads[i], NULL);
+        if (join_status != 0) {
+            fprintf(stderr, "Failed to join worker thread %d: %s\n", 
+                    i, strerror(join_status));
+        } else {
+            printf("Worker thread %d is finished\n", i);
+        }
     }
 
-    printf("All workers finshed. Creating bank thread to update balances\n");
-
-    // create bank thread
+    // Create and run bank thread
+    printf("All workers finished. Creating bank thread to update balances\n");
     pthread_t bank_thread;
-    pthread_create(&bank_thread, NULL, update_balance, NULL);
+    int bank_create_status = pthread_create(&bank_thread, NULL, update_balance, NULL);
+    if (bank_create_status != 0) {
+        fprintf(stderr, "Failed to create bank thread: %s\n", 
+                strerror(bank_create_status));
+        exit(1);
+    }
 
-    // wait for bank thread to finish
-    pthread_join(bank_thread, NULL);
+    // Wait for bank thread
+    int bank_join_status = pthread_join(bank_thread, NULL);
+    if (bank_join_status != 0) {
+        fprintf(stderr, "Failed to join bank thread: %s\n", 
+                strerror(bank_join_status));
+    }
 
     // Print final statistics
     printf("\nProgram Statistics:\n");
     printf("----------------------------------------\n");
-    printf("Total Transactions Processed: %d\n", stats.total_transactions);
-    printf("Invalid Transactions Caught: %d\n", stats.invalid_transactions);
-    printf("Successful Transfers: %d\n", stats.transfers);
-    printf("Successful Deposits: %d\n", stats.deposits);
-    printf("Successful Withdrawals: %d\n", stats.withdrawals);
-    printf("Balance Checks Performed: %d\n", stats.checks);
+    printf("Total Transactions Processed: %d\n", atomic_load(&stats.total_transactions));
+    printf("Invalid Transactions Caught: %d\n", atomic_load(&stats.invalid_transactions));
+    printf("Successful Transfers: %d\n", atomic_load(&stats.transfers));
+    printf("Successful Deposits: %d\n", atomic_load(&stats.deposits));
+    printf("Successful Withdrawals: %d\n", atomic_load(&stats.withdrawals));
+    printf("Balance Checks Performed: %d\n", atomic_load(&stats.checks));
     printf("----------------------------------------\n");
     printf("Process complete, all balances updated & Program Ending Successfully.\n\n");
 
+    // Cleanup
+    for (int i = 0; i < NUM_ACCS; i++) {
+        pthread_mutex_destroy(&account_arr[i].ac_lock);
+    }
+    
+    close(pipe_fd[1]);  // Close write end of pipe
     free(account_arr);
     free(cmd_arr);
-    pthread_mutex_destroy(&account_mutex);
 
     return 0;
 }
 
 void* process_transaction(void* arg) {
-    /* run by worker to handle transaction requests */
     thread_data *data = (thread_data*) arg;
-    static int check_balance_count = 0; // check bal call counter (static to retain val between calls)
+    static atomic_int check_balance_count = 0;
 
-    // run process_trans for each trans in thread range
     for (int i = data->start_index; i < data->end_index; i++) {
         command_line *transaction = &data->transactions[i];
         int src_acc_ind = -1;
         int dst_acc_ind = -1;
         double trans_amount = -1;
 
-        pthread_mutex_lock(&account_mutex); // lock before accessing shared data
-
-        // get account index for account_arr
+        // Find source account index - no lock needed for read-only search
         for (int j = 0; j < NUM_ACCS; j++) {
             if (strcmp(account_arr[j].account_number, transaction->command_list[1]) == 0) {
                 src_acc_ind = j;
@@ -210,17 +261,25 @@ void* process_transaction(void* arg) {
             }
         }
 
-        // check password
-        if (strcmp(account_arr[src_acc_ind].password, transaction->command_list[2]) != 0) {
-            pthread_mutex_unlock(&account_mutex); // unlock if password doesn't match (restarting loop)
+        if (src_acc_ind == -1) {
+            atomic_fetch_add(&data->stats->invalid_transactions, 1);
             continue;
         }
 
-        // do the transaction
+        // Lock source account
+        pthread_mutex_lock(&account_arr[src_acc_ind].ac_lock);
+
+        // Verify password
+        if (strcmp(account_arr[src_acc_ind].password, transaction->command_list[2]) != 0) {
+            atomic_fetch_add(&data->stats->invalid_transactions, 1);
+            pthread_mutex_unlock(&account_arr[src_acc_ind].ac_lock);
+            continue;
+        }
+
         char trans = transaction->command_list[0][0];
         switch (trans) {
             case 'T':
-                // transfer
+                // Find destination account
                 for (int j = 0; j < NUM_ACCS; j++) {
                     if (strcmp(account_arr[j].account_number, transaction->command_list[3]) == 0) {
                         dst_acc_ind = j;
@@ -228,102 +287,129 @@ void* process_transaction(void* arg) {
                     }
                 }
 
+                if (dst_acc_ind == -1) {
+                    atomic_fetch_add(&data->stats->invalid_transactions, 1);
+                    pthread_mutex_unlock(&account_arr[src_acc_ind].ac_lock);
+                    break;
+                }
+
+                // Lock destination account (ensure consistent order to prevent deadlock)
+                if (dst_acc_ind > src_acc_ind) {
+                    pthread_mutex_lock(&account_arr[dst_acc_ind].ac_lock);
+                } else if (dst_acc_ind < src_acc_ind) {
+                    pthread_mutex_unlock(&account_arr[src_acc_ind].ac_lock);
+                    pthread_mutex_lock(&account_arr[dst_acc_ind].ac_lock);
+                    pthread_mutex_lock(&account_arr[src_acc_ind].ac_lock);
+                }
+
                 trans_amount = strtod(transaction->command_list[4], NULL);
                 account_arr[src_acc_ind].balance -= trans_amount;
                 account_arr[src_acc_ind].transaction_tracter += trans_amount;
                 account_arr[dst_acc_ind].balance += trans_amount;
-                stats.transfers++;
-                stats.total_transactions++;
+                
+                atomic_fetch_add(&data->stats->transfers, 1);
+                atomic_fetch_add(&data->stats->total_transactions, 1);
+
+                // Unlock in reverse order
+                if (dst_acc_ind != src_acc_ind) {
+                    pthread_mutex_unlock(&account_arr[dst_acc_ind].ac_lock);
+                }
                 break;
 
             case 'C':
-                // check balance
-                check_balance_count++;
-                if (check_balance_count % 500 == 0) {
-                    // set time val
+                // Check balance
+                int current_count = atomic_fetch_add(&check_balance_count, 1);
+                if ((current_count + 1) % 500 == 0) {
                     time_t now = time(NULL);
                     char time_str[26];
                     ctime_r(&now, time_str);
                     time_str[strlen(time_str) - 1] = '\0';
 
-                    // write to pipe for auditor
-                    char message[128];
-                    snprintf(message, sizeof(message), 
-                            "Worker checked balance of Account %s. Balance is $%.2f. Check occured at %s\n",
+                    char message[256];
+                    snprintf(message, sizeof(message),
+                            "Worker checked balance of Account %s. Balance is $%.2f. Check occurred at %s\n",
                             account_arr[src_acc_ind].account_number,
                             account_arr[src_acc_ind].balance,
                             time_str);
                     write(pipe_fd[1], message, strlen(message));
                 }
-                stats.checks++;
-                stats.total_transactions++;
+                atomic_fetch_add(&data->stats->checks, 1);
+                atomic_fetch_add(&data->stats->total_transactions, 1);
                 break;
 
             case 'D':
-                // deposit
                 trans_amount = strtod(transaction->command_list[3], NULL);
                 account_arr[src_acc_ind].balance += trans_amount;
                 account_arr[src_acc_ind].transaction_tracter += trans_amount;
-                stats.deposits++;
-                stats.total_transactions++;
+                atomic_fetch_add(&data->stats->deposits, 1);
+                atomic_fetch_add(&data->stats->total_transactions, 1);
                 break;
 
             case 'W':
-                // withdrawal
                 trans_amount = strtod(transaction->command_list[3], NULL);
                 account_arr[src_acc_ind].balance -= trans_amount;
                 account_arr[src_acc_ind].transaction_tracter += trans_amount;
-                stats.withdrawals++;
-                stats.total_transactions++;
+                atomic_fetch_add(&data->stats->withdrawals, 1);
+                atomic_fetch_add(&data->stats->total_transactions, 1);
                 break;
 
             default:
-                stats.invalid_transactions++;
+                atomic_fetch_add(&data->stats->invalid_transactions, 1);
                 printf("Error: Invalid transaction type.\n");
-                pthread_mutex_unlock(&account_mutex);
-                return NULL;
+                break;
         }
 
-        pthread_mutex_unlock(&account_mutex); // unlock after accessing shared data
+        pthread_mutex_unlock(&account_arr[src_acc_ind].ac_lock);
     }
 
-    return 0;
+    return NULL;
 }
 
 void* update_balance(void* arg) {
-    /* run by bank thread to update each account.
-       return number of times updated each account */
     FILE* f_out = fopen("Output/output.txt", "w");
+    if (!f_out) {
+        perror("Failed to open output file");
+        return NULL;
+    }
 
-    pthread_mutex_lock(&account_mutex); // lock before updating balances
+    // Lock all accounts in order
+    for (int i = 0; i < NUM_ACCS; i++) {
+        pthread_mutex_lock(&account_arr[i].ac_lock);
+    }
+
+    // Update balances and write to output/pipe
     for (int i = 0; i < NUM_ACCS; i++) {
         account_arr[i].balance += (account_arr[i].reward_rate * account_arr[i].transaction_tracter);
         account_arr[i].transaction_tracter = 0;
 
-        // set time val
+        fprintf(f_out, "%i balance:  %.2f\n\n", i, account_arr[i].balance);
+
+        // Write to auditor pipe
+        char message[256];
         time_t now = time(NULL);
         char time_str[26];
         ctime_r(&now, time_str);
         time_str[strlen(time_str) - 1] = '\0';
-        // write final balance to pipe
-        char message[128];
+        
         snprintf(message, sizeof(message), 
                 "Applied interest to account %s. New Balance: $%.2f. Time of Update: %s\n",
-                account_arr[i].account_number, 
+                account_arr[i].account_number,
                 account_arr[i].balance,
                 time_str);
         write(pipe_fd[1], message, strlen(message));
-
-        fprintf(f_out, "%i balance:  %.2f\n\n", i, account_arr[i].balance);
     }
-    pthread_mutex_unlock(&account_mutex); // unlock after updating balances
+
+    // Unlock all accounts in reverse order
+    for (int i = NUM_ACCS - 1; i >= 0; i--) {
+        pthread_mutex_unlock(&account_arr[i].ac_lock);
+    }
 
     fclose(f_out);
-    return 0;
+    return NULL;
 }
 
+// Auditor process function
 void auditor_process(int read_fd) {
-    /* write pipe info to ledger.txt */
     FILE *ledger = fopen("Output/ledger.txt", "w");
     if (!ledger) {
         perror("Failed to open ledger.txt");
@@ -339,4 +425,3 @@ void auditor_process(int read_fd) {
 
     fclose(ledger);
 }
-// im a goat
